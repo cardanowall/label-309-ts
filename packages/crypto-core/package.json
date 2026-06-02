@@ -1,0 +1,122 @@
+{
+  "name": "@cardanowall/crypto-core",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Closed-catalogue cryptographic primitives for CIP-309 Proof-of-Existence (TypeScript reference implementation; byte-identical Python parity twin).",
+  "license": "Apache-2.0",
+  "author": "Cardanowall <hello@cardanowall.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cardanowall/cip309-ts.git",
+    "directory": "packages/crypto-core"
+  },
+  "homepage": "https://github.com/cardanowall/cip309-ts#readme",
+  "bugs": {
+    "url": "https://github.com/cardanowall/cip309-ts/issues"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./hash": {
+      "types": "./dist/hash.d.ts",
+      "development": "./src/hash/index.ts",
+      "import": "./dist/hash.js",
+      "require": "./dist/hash.cjs"
+    },
+    "./kdf": {
+      "types": "./dist/kdf.d.ts",
+      "development": "./src/kdf/index.ts",
+      "import": "./dist/kdf.js",
+      "require": "./dist/kdf.cjs"
+    },
+    "./sig": {
+      "types": "./dist/sig.d.ts",
+      "development": "./src/sig/index.ts",
+      "import": "./dist/sig.js",
+      "require": "./dist/sig.cjs"
+    },
+    "./kem": {
+      "types": "./dist/kem.d.ts",
+      "development": "./src/kem/index.ts",
+      "import": "./dist/kem.js",
+      "require": "./dist/kem.cjs"
+    },
+    "./aead": {
+      "types": "./dist/aead.d.ts",
+      "development": "./src/aead/index.ts",
+      "import": "./dist/aead.js",
+      "require": "./dist/aead.cjs"
+    },
+    "./util": {
+      "types": "./dist/util.d.ts",
+      "development": "./src/util/index.ts",
+      "import": "./dist/util.js",
+      "require": "./dist/util.cjs"
+    },
+    "./cbor": {
+      "types": "./dist/cbor.d.ts",
+      "development": "./src/cbor/index.ts",
+      "import": "./dist/cbor.js",
+      "require": "./dist/cbor.cjs"
+    },
+    "./cose": {
+      "types": "./dist/cose.d.ts",
+      "development": "./src/cose/index.ts",
+      "import": "./dist/cose.js",
+      "require": "./dist/cose.cjs"
+    },
+    "./seed-derive": {
+      "types": "./dist/seed-derive.d.ts",
+      "development": "./src/seed-derive/index.ts",
+      "import": "./dist/seed-derive.js",
+      "require": "./dist/seed-derive.cjs"
+    },
+    "./sealed-poe": {
+      "types": "./dist/sealed-poe.d.ts",
+      "development": "./src/sealed-poe/index.ts",
+      "import": "./dist/sealed-poe.js",
+      "require": "./dist/sealed-poe.cjs"
+    },
+    "./merkle": {
+      "types": "./dist/merkle.d.ts",
+      "development": "./src/merkle/index.ts",
+      "import": "./dist/merkle.js",
+      "require": "./dist/merkle.cjs"
+    },
+    "./recipient": {
+      "types": "./dist/recipient.d.ts",
+      "development": "./src/recipient/index.ts",
+      "import": "./dist/recipient.js",
+      "require": "./dist/recipient.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@scure/base": "2.2.0",
+    "tsup": "^8.5.1"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/ed25519": "^3.1.0",
+    "@noble/hashes": "^2.2.0",
+    "@noble/post-quantum": "^0.6.1",
+    "cbor2": "^2.3.0",
+    "hash-wasm": "4.12.0"
+  }
+}

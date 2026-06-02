@@ -1,0 +1,21 @@
+# Dependencies and build output
+node_modules/
+dist/
+.turbo/
+coverage/
+*.tsbuildinfo
+
+# pnpm
+.pnpm-store/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Editor and IDE directories
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,28 @@
+{
+  "name": "cip309-ts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CIP-309 Proof-of-Existence TypeScript SDKs: crypto-core, poe-standard, sdk-ts.",
+  "license": "Apache-2.0",
+  "author": "Cardanowall <hello@cardanowall.com>",
+  "homepage": "https://github.com/cardanowall/cip309-ts#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cardanowall/cip309-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cardanowall/cip309-ts/issues"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  }
+}

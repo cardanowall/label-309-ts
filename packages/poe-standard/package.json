@@ -1,0 +1,68 @@
+{
+  "name": "@cardanowall/poe-standard",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "CIP-309 Proof-of-Existence record schema, canonical-CBOR encoder, and validator.",
+  "license": "Apache-2.0",
+  "author": "Cardanowall <hello@cardanowall.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cardanowall/cip309-ts.git",
+    "directory": "packages/poe-standard"
+  },
+  "homepage": "https://github.com/cardanowall/cip309-ts#readme",
+  "bugs": {
+    "url": "https://github.com/cardanowall/cip309-ts/issues"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "development": "./src/schema.ts",
+      "import": "./dist/schema.js",
+      "require": "./dist/schema.cjs"
+    },
+    "./encoder": {
+      "types": "./dist/encoder.d.ts",
+      "development": "./src/encoder.ts",
+      "import": "./dist/encoder.js",
+      "require": "./dist/encoder.cjs"
+    },
+    "./validator": {
+      "types": "./dist/validator.d.ts",
+      "development": "./src/validator.ts",
+      "import": "./dist/validator.js",
+      "require": "./dist/validator.cjs"
+    },
+    "./error-codes": {
+      "types": "./dist/error-codes.d.ts",
+      "development": "./src/error-codes.ts",
+      "import": "./dist/error-codes.js",
+      "require": "./dist/error-codes.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@cardanowall/crypto-core": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1"
+  }
+}

@@ -1,0 +1,160 @@
+name: release
+
+# ONE-TIME registry setup before the FIRST real publish:
+#
+#   1. Bootstrap (token): a Trusted Publisher can only be attached to a package
+#      that already exists on npm, so the very first publish of each package must
+#      authenticate with a token. Set the NPM_TOKEN repository secret to a
+#      GRANULAR access token with publish rights for @cardanowall/* (npm classic
+#      tokens were permanently revoked 2025-12-09 — a granular token is required).
+#      It authenticates the publish step via NODE_AUTH_TOKEN.
+#
+#   2. Trusted Publisher (OIDC): once each package exists, configure a GitHub
+#      Actions Trusted Publisher at npmjs.com for EACH package
+#      (@cardanowall/crypto-core, @cardanowall/poe-standard, @cardanowall/sdk-ts)
+#      with these EXACT fields:
+#         Organization or user : cardanowall
+#         Repository           : cip309-ts
+#         Workflow filename    : release.yml
+#         Environment          : (leave blank)
+#      Then clear the NPM_TOKEN secret. With id-token: write below and the secret
+#      empty, npm exchanges the OIDC token automatically — no stored credential.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (run gates + build + pack; skip the npm publish and the GitHub Release)'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  # id-token is required for npm Trusted-Publisher OIDC (`npm publish` mints
+  # provenance from this token by default).
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - name: Setup Node.js (writes the npm auth .npmrc + sets the registry)
+        uses: actions/setup-node@v6
+        with:
+          # npm OIDC trusted publishing requires Node >=22.14.0; 22 resolves to
+          # the latest 22.x line, which satisfies that floor.
+          node-version: 22
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      # npm OIDC trusted publishing requires the npm CLI >=11.5.1; the npm bundled
+      # with Node 22 predates it, so upgrade before publishing.
+      - name: Ensure npm >=11.5.1 (OIDC trusted publishing)
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # ---- Gates: the standalone CI suite, re-run as release-blockers ----------
+      - name: Build all packages
+        run: pnpm -r build
+
+      - name: Typecheck
+        run: pnpm -r --if-present run typecheck
+
+      - name: Test (full suite)
+        run: pnpm exec vitest run
+
+      # ---- Pre-publish pack sanity (each tarball ships LICENSE/README/dist) -----
+      - name: Pack sanity (LICENSE + README + dist present, no src/tests)
+        run: |
+          set -euo pipefail
+          for pkg in crypto-core poe-standard sdk-ts; do
+            echo "--- packing @cardanowall/$pkg ---"
+            ( cd "packages/$pkg" && pnpm pack --pack-destination ./dist-pack )
+            tarball=$(ls "packages/$pkg"/dist-pack/*.tgz | head -1)
+            contents=$(tar -tzf "$tarball")
+            for required in LICENSE README.md; do
+              if ! grep -qE "(^|/)${required}$" <<< "$contents"; then
+                echo "ERROR: $pkg tarball missing $required — aborting." >&2
+                exit 1
+              fi
+            done
+            if ! grep -qE "(^|/)dist/" <<< "$contents"; then
+              echo "ERROR: $pkg tarball ships no dist/ — aborting." >&2
+              exit 1
+            fi
+            if grep -qE "(^|/)(src|tests)/" <<< "$contents"; then
+              echo "ERROR: $pkg tarball leaks src/ or tests/ — aborting." >&2
+              exit 1
+            fi
+          done
+
+      # ---- Publish to npm (OIDC trusted publishing; NPM_TOKEN bootstrap fallback)
+      # crypto-core → poe-standard → sdk-ts: a consumer installing @cardanowall/sdk-ts
+      # must find its dependency closure already on the registry, so the leaf
+      # publishes first. The tarballs were produced by `pnpm pack` above, which
+      # already rewrote the workspace:* ranges to concrete versions, so the npm
+      # CLI publishes them as-is.
+      #
+      # Auth resolution: when NPM_TOKEN is set (bootstrap / first publish that
+      # CREATES the package), NODE_AUTH_TOKEN token-authenticates the publish.
+      # When NPM_TOKEN is empty AND id-token: write + a configured Trusted
+      # Publisher exist, npm uses OIDC and emits provenance by default (no
+      # --provenance flag needed, and none is valid for pnpm here).
+      - name: Publish to npm (OIDC trusted publishing, dry-run on workflow_dispatch)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          DRY=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            DRY="--dry-run"
+            echo "Dry-run: npm publish --dry-run (no registry mutation)"
+          fi
+          for pkg in crypto-core poe-standard sdk-ts; do
+            echo "--- publishing @cardanowall/$pkg ---"
+            tarball=$(ls "packages/$pkg"/dist-pack/*.tgz | head -1)
+            npm publish "$tarball" --access public $DRY
+          done
+
+      # ---- GitHub Release ------------------------------------------------------
+      - name: Detect pre-release tag
+        id: prerelease
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          if [[ "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-.+$ ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: 'CIP-309 TypeScript SDKs ${{ github.ref_name }}'
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          files: |
+            packages/*/dist-pack/*.tgz

@@ -1,0 +1,109 @@
+{
+  "name": "@cardanowall/sdk-ts",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "CardanoWall TypeScript SDK — standalone CIP-309 verifier + envelope helpers + HTTP client (browser-safe).",
+  "license": "Apache-2.0",
+  "author": "Cardanowall <hello@cardanowall.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cardanowall/cip309-ts.git",
+    "directory": "packages/sdk-ts"
+  },
+  "homepage": "https://github.com/cardanowall/cip309-ts#readme",
+  "bugs": {
+    "url": "https://github.com/cardanowall/cip309-ts/issues"
+  },
+  "keywords": [
+    "cardano",
+    "cip-309",
+    "proof-of-existence",
+    "poe",
+    "cardanowall",
+    "sdk"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "bin": {
+    "cardanowall-sdk-conformance": "dist/conformance/cli.js"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./fetch": {
+      "types": "./dist/fetch/index.d.ts",
+      "development": "./src/fetch/index.ts",
+      "import": "./dist/fetch/index.js",
+      "require": "./dist/fetch/index.cjs"
+    },
+    "./verifier": {
+      "types": "./dist/verifier/index.d.ts",
+      "development": "./src/verifier/index.ts",
+      "import": "./dist/verifier/index.js",
+      "require": "./dist/verifier/index.cjs"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "development": "./src/client/index.ts",
+      "import": "./dist/client/index.js",
+      "require": "./dist/client/index.cjs"
+    },
+    "./ids": {
+      "types": "./dist/ids/index.d.ts",
+      "development": "./src/ids/index.ts",
+      "import": "./dist/ids/index.js",
+      "require": "./dist/ids/index.cjs"
+    },
+    "./merkle": {
+      "types": "./dist/merkle/index.d.ts",
+      "development": "./src/merkle/index.ts",
+      "import": "./dist/merkle/index.js",
+      "require": "./dist/merkle/index.cjs"
+    },
+    "./hash": {
+      "types": "./dist/hash/index.d.ts",
+      "development": "./src/hash/index.ts",
+      "import": "./dist/hash/index.js",
+      "require": "./dist/hash/index.cjs"
+    },
+    "./identity": {
+      "types": "./dist/identity/index.d.ts",
+      "development": "./src/identity/index.ts",
+      "import": "./dist/identity/index.js",
+      "require": "./dist/identity/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@cardanowall/crypto-core": "workspace:*",
+    "@cardanowall/poe-standard": "workspace:*",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/ed25519": "^3.1.0",
+    "@noble/hashes": "^2.2.0",
+    "cbor2": "^2.3.0",
+    "hash-wasm": "4.12.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1"
+  }
+}
