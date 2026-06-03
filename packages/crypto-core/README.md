@@ -20,7 +20,7 @@ the SDKs (`@cardanowall/sdk-ts`, `@cardanowall/sdk-py`) are built on top of thes
 
 Hybrid post-quantum is first-class: the X-Wing KEM (`mlkem768x25519`, ML-KEM-768 + X25519 per
 draft-connolly-cfrg-xwing-kem) is a supported sealed-PoE branch alongside classical X25519, and
-every seed-derived identity carries an X-Wing keypair so it can always *receive* hybrid records.
+every seed-derived identity carries an X-Wing keypair so it can always _receive_ hybrid records.
 
 ## Install
 
@@ -66,11 +66,7 @@ const { sha256, blake2b256 } = await dualHashStream(fileChunkAsyncIterable);
 ### Derive an identity and sign
 
 ```ts
-import {
-  deriveEd25519KeypairFromSeed,
-  signEd25519,
-  verifyEd25519,
-} from '@cardanowall/crypto-core';
+import { deriveEd25519KeypairFromSeed, signEd25519, verifyEd25519 } from '@cardanowall/crypto-core';
 
 const seed = crypto.getRandomValues(new Uint8Array(32)); // 32-byte identity seed
 const { secretKey, publicKey } = deriveEd25519KeypairFromSeed(seed);
@@ -116,7 +112,7 @@ if (result.matched) {
 
 Recipients holding a rotated identity (current key plus archived keys, across both KEMs) pass the
 whole `recipientKeyBundle` instead of a single key; the trial-decrypt loop is constant-time over the
-slot count by default. `eciesSealedPoeTrialDecrypt` recovers the content key and slot index *without*
+slot count by default. `eciesSealedPoeTrialDecrypt` recovers the content key and slot index _without_
 the off-chain ciphertext — the operation an inbox scanner runs to discover readable records before
 fetching their blobs.
 
@@ -130,7 +126,7 @@ import {
 } from '@cardanowall/crypto-core';
 
 const classical = encodeAgeX25519Recipient(recipient.publicKey); // "age1…"
-const hybrid = encodeAgeXWingRecipient(xwingPublicKey);          // "age1pqc…"
+const hybrid = encodeAgeXWingRecipient(xwingPublicKey); // "age1pqc…"
 
 const parsed = parseAgeRecipient(classical);
 // { kem: 'x25519' | 'mlkem768x25519', publicKey: Uint8Array } — routed on the bech32 prefix
@@ -140,21 +136,21 @@ const parsed = parseAgeRecipient(classical);
 
 Each group is also a subpath export. Names below are the actual exported symbols.
 
-| Group         | Catalogue                                                                                                                                                                  |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hash`        | `sha256` (FIPS 180-4), `blake2b256` / `blake2b224` (RFC 7693, CIP-19), `dualHash` / `dualHashStream`, `merkleSha2256Root` and inclusion-proof helpers (RFC 9162)          |
-| `kdf`         | `hkdfSha256` (RFC 5869), `argon2idV13` (RFC 9106), `pbkdf2Sha256` (RFC 8018)                                                                                              |
-| `sig`         | `signEd25519` / `verifyEd25519` / `getPublicKeyEd25519` (RFC 8032, strict non-cofactored verification), identity-link challenge builder                                    |
-| `kem`         | `x25519Keygen` / `x25519PublicKey` / `x25519Ecdh` (RFC 7748, low-order-point rejection); `mlkem768x25519Keygen` / `…Encapsulate` / `…Decapsulate` (X-Wing hybrid PQ KEM)  |
-| `aead`        | `chacha20Poly1305*` (RFC 8439), `xchacha20Poly1305*`, `aes256Gcm*`                                                                                                        |
-| `cbor`        | `encodeCanonicalCbor` / `decodeCanonicalCbor` (RFC 8949 §4.2.1) plus a permissive outer-wire decoder                                                                      |
-| `cose`        | `coseSign1Cip309Build` / `coseSign1Cip309Verify`, `encodeCoseSign1` / `decodeCoseSign1`, `buildCip309SigStructure` (COSE_Sign1, RFC 9052)                                 |
-| `seed-derive` | `deriveEd25519KeypairFromSeed`, `deriveX25519KeypairFromSeed`, `deriveMlKem768X25519KeypairFromSeed` — deterministic long-term identity keys from one 32-byte seed         |
-| `discovery`   | `derivePassphraseDiscoveryTag` (Argon2id → HMAC), `deriveWebauthnDiscoveryTagFromPrf` — envelope-discovery tags                                                           |
-| `sealed-poe`  | `eciesSealedPoeWrap` / `eciesSealedPoeUnwrap` / `eciesSealedPoeTrialDecrypt`, the slots codec, and `RecipientKeyBundle` (age-style ECIES with AEAD-bound slots)            |
-| `merkle`      | `encodeLeavesList` / `decodeLeavesList` — canonical-CBOR codec for the off-chain Merkle leaves-list artefact                                                              |
-| `recipient`   | `encodeAgeX25519Recipient` / `encodeAgeXWingRecipient` / `parseAgeRecipient`, bech32 codec                                                                                |
-| `util`        | `compareCt` (constant-time comparison), `hexToBytes`                                                                                                                      |
+| Group         | Catalogue                                                                                                                                                                |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `hash`        | `sha256` (FIPS 180-4), `blake2b256` / `blake2b224` (RFC 7693, CIP-19), `dualHash` / `dualHashStream`, `merkleSha2256Root` and inclusion-proof helpers (RFC 9162)         |
+| `kdf`         | `hkdfSha256` (RFC 5869), `argon2idV13` (RFC 9106), `pbkdf2Sha256` (RFC 8018)                                                                                             |
+| `sig`         | `signEd25519` / `verifyEd25519` / `getPublicKeyEd25519` (RFC 8032, strict non-cofactored verification), identity-link challenge builder                                  |
+| `kem`         | `x25519Keygen` / `x25519PublicKey` / `x25519Ecdh` (RFC 7748, low-order-point rejection); `mlkem768x25519Keygen` / `…Encapsulate` / `…Decapsulate` (X-Wing hybrid PQ KEM) |
+| `aead`        | `chacha20Poly1305*` (RFC 8439), `xchacha20Poly1305*`, `aes256Gcm*`                                                                                                       |
+| `cbor`        | `encodeCanonicalCbor` / `decodeCanonicalCbor` (RFC 8949 §4.2.1) plus a permissive outer-wire decoder                                                                     |
+| `cose`        | `coseSign1Cip309Build` / `coseSign1Cip309Verify`, `encodeCoseSign1` / `decodeCoseSign1`, `buildCip309SigStructure` (COSE_Sign1, RFC 9052)                                |
+| `seed-derive` | `deriveEd25519KeypairFromSeed`, `deriveX25519KeypairFromSeed`, `deriveMlKem768X25519KeypairFromSeed` — deterministic long-term identity keys from one 32-byte seed       |
+| `discovery`   | `derivePassphraseDiscoveryTag` (Argon2id → HMAC), `deriveWebauthnDiscoveryTagFromPrf` — envelope-discovery tags                                                          |
+| `sealed-poe`  | `eciesSealedPoeWrap` / `eciesSealedPoeUnwrap` / `eciesSealedPoeTrialDecrypt`, the slots codec, and `RecipientKeyBundle` (age-style ECIES with AEAD-bound slots)          |
+| `merkle`      | `encodeLeavesList` / `decodeLeavesList` — canonical-CBOR codec for the off-chain Merkle leaves-list artefact                                                             |
+| `recipient`   | `encodeAgeX25519Recipient` / `encodeAgeXWingRecipient` / `parseAgeRecipient`, bech32 codec                                                                               |
+| `util`        | `compareCt` (constant-time comparison), `hexToBytes`                                                                                                                     |
 
 See `src/index.ts` and each submodule's `index.ts` for the exhaustive surface.
 

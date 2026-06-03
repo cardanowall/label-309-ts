@@ -42,9 +42,9 @@ const report = await verifyTx({
   cardanoGatewayChain: ['https://api.koios.rest/api/v1'], // tried in order
 });
 
-console.log(report.verdict);   // 'valid' | 'pending' | 'failed'
+console.log(report.verdict); // 'valid' | 'pending' | 'failed'
 console.log(report.exit_code); // 0 valid · 1 integrity fail · 2 network fail · 3 pending
-console.log(report.record);    // the decoded CIP-309 PoeRecord
+console.log(report.record); // the decoded CIP-309 PoeRecord
 ```
 
 To decrypt a sealed PoE addressed to you, run at the **recipient-sealed** profile and supply your X25519 private key per item index:
@@ -68,11 +68,11 @@ When you already hold the metadata bytes from an indexer mirror, skip the chain 
 `baseUrl` is **required** — the client binds to no particular deployment. `apiKey`, when present, is an **opaque** bearer token forwarded verbatim as `Authorization: Bearer <apiKey>`; the SDK never parses or assumes its format. Omit it for anonymous read-only use.
 
 ```ts
-import { CardanowallClient } from '@cardanowall/sdk-ts';
+import { Cip309Client } from '@cardanowall/sdk-ts';
 
-const client = new CardanowallClient({
+const client = new Cip309Client({
   baseUrl: 'https://gateway.example.com', // any CIP-309 gateway
-  apiKey: process.env.CIP309_API_KEY,     // opaque; omit for anonymous reads
+  apiKey: process.env.CIP309_API_KEY, // opaque; omit for anonymous reads
 });
 
 // Read surface — no auth required for public records.
@@ -94,7 +94,7 @@ const quote = await client.poe.quote({
 
 // Hash-only PoE: hash the content, build the record, submit. One HTTP call.
 const result = await client.poe.publishContent({
-  content: 'hello world',        // string (UTF-8) or Uint8Array
+  content: 'hello world', // string (UTF-8) or Uint8Array
   quoteId: quote.quote_id,
   // signer is optional; omit to publish unsigned (profile=core)
 });
@@ -132,9 +132,9 @@ import {
   decryptSealedFromSeed,
 } from '@cardanowall/sdk-ts';
 
-const keys = deriveKeysFromSeed(seed);        // { ed25519, x25519, mlkem768x25519 }
-const me = recipientsFromSeed(seed);          // { age: 'age1…', age1pqc: 'age1pqc…' }
-const signer = signerFromSeed(seed);          // a path-1 Signer for the publish helpers
+const keys = deriveKeysFromSeed(seed); // { ed25519, x25519, mlkem768x25519 }
+const me = recipientsFromSeed(seed); // { age: 'age1…', age1pqc: 'age1pqc…' }
+const signer = signerFromSeed(seed); // a path-1 Signer for the publish helpers
 
 // Decrypt a sealed PoE addressed to this seed — works for both classical
 // (x25519) and hybrid post-quantum (mlkem768x25519 / X-Wing) records.
@@ -149,6 +149,7 @@ if (result.matched) {
 Everything is reachable from the package root; submodule entry points (`/verifier`, `/client`, `/identity`, `/merkle`, `/hash`, `/fetch`) exist for tree-shaking.
 
 **Verifier** (`@cardanowall/sdk-ts` or `/verifier`)
+
 - `verifyTx(input)` / `verifyResolved(input)` — the full pipeline; returns a `VerifyReport`.
 - `verifyRecordSignatures`, `verifyMerkleCommitments`, `tryDecryptions` — individual stages.
 - `DEFAULT_PROFILE`, `profileImplements`, `planProfileSkips` — the four conformance profiles (`core` → `signed` → `sealed` → `recipient-sealed`).
@@ -156,18 +157,21 @@ Everything is reachable from the package root; submodule entry points (`/verifie
 - `resolveCardanoTx`, `extractLabel309Metadata`, `decodeTxWitnesses`, `decodeTxSummary` — resolution + transaction-level description.
 
 **Client** (`/client`)
-- `CardanowallClient({ baseUrl, apiKey?, fetch? })` — `baseUrl` required, key opaque.
+
+- `Cip309Client({ baseUrl, apiKey?, fetch? })` — `baseUrl` required, key opaque.
 - `client.poe.{quote, publishContent, publishPrehashed, publishSealed, publishMerkle, uploads, publish, publishBatch}`.
 - `client.records.{get, verify}`, `client.inbox.{list, get}`, `client.account.balance()`.
 - Off-host signing: `prepareSigStructure`, `assembleCoseSign1`, plus the CIP-8 hashed-mode pair `prepareSigStructureHashed` / `assembleCoseSign1Hashed`.
-- Typed errors extending `CardanowallHttpError`: `InsufficientFundsError`, `QuoteExpiredError`, `QuoteAlreadyConsumedError`, `FxStaleError`, `RateLimitedError`, `UnauthorizedError`, `ValidationFailedError`, `MalformedCborError`, `InvalidClientConfigError`, and more.
+- Typed errors extending `Cip309HttpError`: `InsufficientFundsError`, `QuoteExpiredError`, `QuoteAlreadyConsumedError`, `FxStaleError`, `RateLimitedError`, `UnauthorizedError`, `ValidationFailedError`, `MalformedCborError`, `InvalidClientConfigError`, and more.
 
 **Identity** (`/identity`)
+
 - `deriveKeysFromSeed`, `recipientsFromSeed`, `signerFromSeed`, `recipientKeyBundleFromSeed`, `decryptSealedFromSeed`.
 - Recipient codecs `encodeAgeX25519Recipient`, `encodeAgeXWingRecipient`, `parseAgeRecipient`.
 - Low-level derive primitives `deriveEd25519KeypairFromSeed`, `deriveX25519KeypairFromSeed`, `deriveMlKem768X25519KeypairFromSeed`.
 
 **Wire format & primitives** (re-exported for convenience)
+
 - From `@cardanowall/poe-standard`: `validatePoeRecord`, `encodePoeRecord`, `encodeRecordBodyForSigning`, the error-code catalogues (`STRUCTURAL_ERROR_CODES`, `VERIFIER_ERROR_CODES`, `ERROR_CODES`), `severityOf`, `PoeRecordSchema`.
 - From `@cardanowall/crypto-core`: `eciesSealedPoeWrap` / `eciesSealedPoeUnwrap` (sealed PoE), `hash.*` (digests), `merkle.*` (`merkleSha2256Root`, `merkleSha2256InclusionProof`, `merkleSha2256VerifyInclusion`, leaves-list codecs).
 

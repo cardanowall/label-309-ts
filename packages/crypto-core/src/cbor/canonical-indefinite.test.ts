@@ -39,9 +39,7 @@ const negativeCorpus = JSON.parse(fs.readFileSync(negativeFixturePath, 'utf8')) 
 describe('decodeCanonicalCbor — rejects indefinite-length inputs', () => {
   // Indefinite-length items reject under the single public taxonomy code
   // MALFORMED_CBOR; the specific cause survives in the human-readable message.
-  const indefiniteVectors = negativeCorpus.vectors.filter((v) =>
-    v.name.startsWith('indefinite-'),
-  );
+  const indefiniteVectors = negativeCorpus.vectors.filter((v) => v.name.startsWith('indefinite-'));
   expect(indefiniteVectors.length).toBeGreaterThanOrEqual(4);
   for (const vector of indefiniteVectors) {
     it(`rejects ${vector.name} as MALFORMED_CBOR with an indefinite-length message`, () => {

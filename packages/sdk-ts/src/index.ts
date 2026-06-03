@@ -52,11 +52,7 @@ export {
   recipientKeyBundleFromSeed,
   decryptSealedFromSeed,
 } from './identity/index';
-export type {
-  SeedKeys,
-  SeedRecipients,
-  DecryptSealedFromSeedArgs,
-} from './identity/index';
+export type { SeedKeys, SeedRecipients, DecryptSealedFromSeedArgs } from './identity/index';
 
 // Canonical age recipient codecs (also reachable seed-free for callers that
 // already hold raw KEM public keys). `parseAgeRecipient` is the decode side: a
@@ -67,10 +63,7 @@ export {
   encodeAgeXWingRecipient,
   parseAgeRecipient,
 } from '@cardanowall/crypto-core/recipient';
-export type {
-  ParsedAgeRecipient,
-  RecipientKem,
-} from '@cardanowall/crypto-core/recipient';
+export type { ParsedAgeRecipient, RecipientKem } from '@cardanowall/crypto-core/recipient';
 
 // Re-export the derive primitives + types so a seed holder can compose flows
 // the high-level helpers don't cover (these were previously only reachable via

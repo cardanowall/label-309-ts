@@ -113,11 +113,13 @@ The package root re-exports every group. Subpath imports are available for `./sc
 `./validator`, and `./error-codes`.
 
 **Encode** (`@cardanowall/poe-standard/encoder`)
+
 - `encodePoeRecord(record)` — canonical CBOR for chain submission.
 - `encodeRecordBodyForSigning(record)` — the `record_body` (full map minus `sigs`) that record-level
   COSE_Sign1 signatures sign over.
 
 **Validate** (`@cardanowall/poe-standard/validator`)
+
 - `validatePoeRecord(bytes)` — the structural pipeline: canonical decode → schema parse → cross-field
   domain checks. Returns a discriminated `ValidateResult`; never throws.
 - `validateCidProfile(cid)` — offline IPFS CID-profile parser (CIDv0 and the CIP-309 CIDv1 multibase
@@ -125,14 +127,16 @@ The package root re-exports every group. Subpath imports are available for `./sc
 - `type ValidateResult`, `type ValidationIssue`.
 
 **Error codes** (`@cardanowall/poe-standard/error-codes`)
+
 - `STRUCTURAL_ERROR_CODES` — the codes the structural validator emits (Part A).
 - `VERIFIER_ERROR_CODES` — the verifier-layer codes (Part B), re-exported so downstream verifiers
   dispatch on a single union without round-tripping through the SDK.
 - `ERROR_CODES` — their union; `SEVERITY` / `severityOf(code)` map each to `'error' | 'warning' |
-  'info'`. Codes are SCREAMING_SNAKE_CASE and byte-exact across implementations.
+'info'`. Codes are SCREAMING_SNAKE_CASE and byte-exact across implementations.
 - `type ErrorCode`, `type StructuralErrorCode`, `type VerifierErrorCode`, `type Severity`.
 
 **Schema + types** (`@cardanowall/poe-standard/schema`)
+
 - Zod schemas for the full v1 wire surface: `PoeRecordSchema`, `ItemEntrySchema`,
   `MerkleCommitSchema`, `EncryptionEnvelopeSchema`, `SlotSchema`, `PassphraseBlockSchema`,
   `Argon2idParamsSchema`, `HashesMapSchema`, `HashDigestSchema`, `SigEntrySchema`,
@@ -145,6 +149,7 @@ The package root re-exports every group. Subpath imports are available for `./sc
   `EXTENSION_KEY_COMPANION_RE`.
 
 **Chunking** (re-exported from the root)
+
 - `chunkBytes` / `bytesChunkArrayConcat` — split/reassemble chunked byte strings (COSE_Sign1,
   COSE_Key blobs).
 - `chunkUri` / `reconstructChunkedUri` — split/reassemble chunked URI arrays on UTF-8 boundaries.

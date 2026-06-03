@@ -42,7 +42,7 @@ function canonicalJson(d: Record<string, unknown>): string {
   return JSON.stringify(d, sortedKeys, 2) + '\n';
 }
 
-function isCardanowallHost(url: string): boolean {
+function isCardanoWallHost(url: string): boolean {
   const h = new URL(url).hostname
     .toLowerCase()
     .replace(/^\[|\]$/g, '')
@@ -61,9 +61,9 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-async function verifyCorpusRecord(record: MainnetCorpusRecord): Promise<
-  Awaited<ReturnType<typeof verifyTx>>
-> {
+async function verifyCorpusRecord(
+  record: MainnetCorpusRecord,
+): Promise<Awaited<ReturnType<typeof verifyTx>>> {
   const useBlockfrost = record.provider === 'blockfrost';
   const decryption = (record.recipient_secret_keys ?? []).map((r) => ({
     itemIndex: r.item_index,
@@ -111,7 +111,7 @@ describe('verify-mainnet-corpus integration', () => {
         const expected = readFileSync(`${FIXTURES_DIR}${txHash}.json`, 'utf8');
         expect(actual).toBe(expected);
         expect(result.verdict).toBe(record.expected_verdict);
-        expect(result.http_calls.every((c) => !isCardanowallHost(c.url))).toBe(true);
+        expect(result.http_calls.every((c) => !isCardanoWallHost(c.url))).toBe(true);
       });
     },
   );

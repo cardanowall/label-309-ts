@@ -101,15 +101,10 @@ interface RecipientsCorpus {
 const here = path.dirname(fileURLToPath(import.meta.url));
 // The seed-derive corpora are shared across crypto-core, sdk-ts, and sdk-py;
 // they live in crypto-core as the single source of truth.
-const seedFixturesDir = path.resolve(
-  here,
-  '../../../crypto-core/tests/fixtures/seed-derive',
-);
+const seedFixturesDir = path.resolve(here, '../../../crypto-core/tests/fixtures/seed-derive');
 
 function loadSeedCorpus(file: string): SeedDeriveCorpus {
-  return JSON.parse(
-    fs.readFileSync(path.join(seedFixturesDir, file), 'utf8'),
-  ) as SeedDeriveCorpus;
+  return JSON.parse(fs.readFileSync(path.join(seedFixturesDir, file), 'utf8')) as SeedDeriveCorpus;
 }
 
 const SEED_FILES = ['seed-from-zero.json', 'seed-from-ff.json', 'seed-from-deadbeef.json'];

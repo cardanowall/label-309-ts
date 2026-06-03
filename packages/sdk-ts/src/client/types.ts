@@ -462,4 +462,3 @@ export interface PublishMerkleResponse {
   /** Account balance after the debit, USD micro-cents (decimal string). */
   readonly balance_after_usd_micros: string;
 }
-

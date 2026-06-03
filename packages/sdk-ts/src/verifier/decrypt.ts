@@ -13,7 +13,10 @@
 import { argon2idV13 } from '@cardanowall/crypto-core/kdf';
 import { xchacha20Poly1305Decrypt, AeadVerificationError } from '@cardanowall/crypto-core/aead';
 import { blake2b256, sha256 } from '@cardanowall/crypto-core/hash';
-import { eciesSealedPoeUnwrap, sealedEnvelopeFromParsed } from '@cardanowall/crypto-core/sealed-poe';
+import {
+  eciesSealedPoeUnwrap,
+  sealedEnvelopeFromParsed,
+} from '@cardanowall/crypto-core/sealed-poe';
 import { compareCt } from '@cardanowall/crypto-core/util';
 import type { ItemEntry, PoeRecord } from '@cardanowall/poe-standard';
 
@@ -145,7 +148,9 @@ export async function tryDecryptions(args: TryDecryptionsArgs): Promise<TryDecry
       // dispatching on `enc.kem` (classical `{epk, wrap}` vs hybrid
       // `{kem_ct, wrap}`). A null result means the envelope isn't a sealed
       // recipient envelope we can unwrap — surface it as wrong-input-shape.
-      const envelope = sealedEnvelopeFromParsed(enc as Parameters<typeof sealedEnvelopeFromParsed>[0]);
+      const envelope = sealedEnvelopeFromParsed(
+        enc as Parameters<typeof sealedEnvelopeFromParsed>[0],
+      );
       if (envelope === null) {
         out.push({
           item_index: idx,

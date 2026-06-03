@@ -433,11 +433,7 @@ function validateOneUri(
   // Absolute URI, no fragment, scheme in `{ar://, ipfs://}`.
   if (uri.includes('#')) {
     errors.push(
-      issue(
-        'INVALID_URI',
-        path,
-        "URI contains a fragment identifier ('#'), which is forbidden",
-      ),
+      issue('INVALID_URI', path, "URI contains a fragment identifier ('#'), which is forbidden"),
     );
     return;
   }
@@ -473,22 +469,14 @@ function validateOneUri(
     const cid = slashIdx === -1 ? rest : rest.slice(0, slashIdx);
     if (!validateCidProfile(cid)) {
       errors.push(
-        issue(
-          'INVALID_URI',
-          path,
-          'ipfs:// URI is not a valid CID under the CIP-309 profile',
-        ),
+        issue('INVALID_URI', path, 'ipfs:// URI is not a valid CID under the CIP-309 profile'),
       );
     }
     return;
   }
   // Scheme not in `{ar://, ipfs://}`.
   errors.push(
-    issue(
-      'INVALID_URI',
-      path,
-      'unsupported URI scheme; v1 PoE URI set is {ar://, ipfs://}',
-    ),
+    issue('INVALID_URI', path, 'unsupported URI scheme; v1 PoE URI set is {ar://, ipfs://}'),
   );
 }
 

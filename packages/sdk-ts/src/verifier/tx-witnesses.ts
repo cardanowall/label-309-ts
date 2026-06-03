@@ -180,7 +180,8 @@ export function decodeTxSummary(
 
   const invalidHereafter = body.get(BODY_KEY_INVALID_HEREAFTER);
   if (typeof invalidHereafter === 'number') summary.invalid_hereafter = invalidHereafter;
-  else if (typeof invalidHereafter === 'bigint') summary.invalid_hereafter = Number(invalidHereafter);
+  else if (typeof invalidHereafter === 'bigint')
+    summary.invalid_hereafter = Number(invalidHereafter);
 
   if (requiredSigners.length > 0) summary.required_signer_key_hashes = requiredSigners;
 

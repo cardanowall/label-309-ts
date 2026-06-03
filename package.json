@@ -5,7 +5,7 @@
   "type": "module",
   "description": "CIP-309 Proof-of-Existence TypeScript SDKs: crypto-core, poe-standard, sdk-ts.",
   "license": "Apache-2.0",
-  "author": "Cardanowall <hello@cardanowall.com>",
+  "author": "CardanoWall <hello@cardanowall.com>",
   "homepage": "https://github.com/cardanowall/cip309-ts#readme",
   "repository": {
     "type": "git",

@@ -26,7 +26,7 @@ const corpus = MainnetCorpusSchema.parse(JSON.parse(readFileSync(CORPUS_PATH, 'u
 
 const CONFORMANCE_DENY = ['cardanowall.com', '*.cardanowall.com', 'localhost', '127.0.0.1'];
 
-function isCardanowallHost(url: string): boolean {
+function isCardanoWallHost(url: string): boolean {
   const h = new URL(url).hostname
     .toLowerCase()
     .replace(/^\[|\]$/g, '')
@@ -71,13 +71,13 @@ describe.each(corpus.records.map((r) => [r.tx_hash, r] as const))(
     it('verifies with conformance denyHosts (Layer 1 active)', async () => {
       const result = await verifyCorpusRecord(record, CONFORMANCE_DENY);
       expect(result.verdict).toBe(record.expected_verdict);
-      expect(result.http_calls.every((c) => !isCardanowallHost(c.url))).toBe(true);
+      expect(result.http_calls.every((c) => !isCardanoWallHost(c.url))).toBe(true);
     });
 
     it('verifies with denyHosts: [] (Layer 1 bypassed)', async () => {
       const result = await verifyCorpusRecord(record, []);
       expect(result.verdict).toBe(record.expected_verdict);
-      expect(result.http_calls.every((c) => !isCardanowallHost(c.url))).toBe(true);
+      expect(result.http_calls.every((c) => !isCardanoWallHost(c.url))).toBe(true);
     });
 
     it.skipIf(!process.env['CARDANOWALL_NXDOMAIN_LAYER2'])(

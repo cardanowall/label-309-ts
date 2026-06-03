@@ -1,10 +1,10 @@
 {
   "name": "@cardanowall/poe-standard",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "CIP-309 Proof-of-Existence record schema, canonical-CBOR encoder, and validator.",
   "license": "Apache-2.0",
-  "author": "Cardanowall <hello@cardanowall.com>",
+  "author": "CardanoWall <hello@cardanowall.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cardanowall/cip309-ts.git",

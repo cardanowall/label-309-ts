@@ -69,14 +69,7 @@ interface RecordJson {
 // Top-level JSON keys the reconstructor consumes itself (base fields + their
 // `_hex` reconstruction hints). Every OTHER top-level key is a genuine
 // extension key (`x-note`, `x-meta`, …) and is copied through verbatim.
-const CONSUMED_TOP_KEYS = new Set([
-  'v',
-  'items',
-  'merkle',
-  'supersedes_hex',
-  'sigs',
-  'crit',
-]);
+const CONSUMED_TOP_KEYS = new Set(['v', 'items', 'merkle', 'supersedes_hex', 'sigs', 'crit']);
 
 function fromHex(hex: string): Uint8Array {
   return Uint8Array.from(Buffer.from(hex, 'hex'));
@@ -110,7 +103,8 @@ function buildRecord(json: RecordJson): PoeRecord {
             wrap: fromHex(s.wrap_hex),
           }));
         }
-        if (item.enc.slots_mac_hex !== undefined) enc['slots_mac'] = fromHex(item.enc.slots_mac_hex);
+        if (item.enc.slots_mac_hex !== undefined)
+          enc['slots_mac'] = fromHex(item.enc.slots_mac_hex);
         out['enc'] = enc;
       }
       return out;

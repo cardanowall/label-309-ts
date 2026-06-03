@@ -213,8 +213,16 @@ async function verifyResolvedRecord(args: {
   httpCalls: HttpCallRecord[];
   fetchFn: ReturnType<typeof wrapFetchOutbound>;
 }): Promise<VerifyReport> {
-  const { input, metadataBytes, txCbor, numConfirmations, blockTime, blockSlot, httpCalls, fetchFn } =
-    args;
+  const {
+    input,
+    metadataBytes,
+    txCbor,
+    numConfirmations,
+    blockTime,
+    blockSlot,
+    httpCalls,
+    fetchFn,
+  } = args;
   const profile = input.profile ?? DEFAULT_PROFILE;
   const threshold = input.confirmationDepthThreshold ?? CONFIRMATION_DEPTH_THRESHOLD_DEFAULT;
 
@@ -382,10 +390,7 @@ async function verifyResolvedRecord(args: {
 // failure must NOT propagate into the verdict — it degrades to omitting the
 // affected fields. The label-309 record is validated separately from
 // `metadataBytes`; this view only describes the carrying transaction.
-type TxDescriptionFields = Pick<
-  VerifyReport,
-  'tx_witnesses' | 'tx_summary' | 'metadata_labels'
->;
+type TxDescriptionFields = Pick<VerifyReport, 'tx_witnesses' | 'tx_summary' | 'metadata_labels'>;
 function decodeTxDescription(txCbor: Uint8Array, input: VerifyTxInput): TxDescriptionFields {
   const network = input.cardanoNetwork ?? 'mainnet';
   const out: { -readonly [K in keyof TxDescriptionFields]: TxDescriptionFields[K] } = {};

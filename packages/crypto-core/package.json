@@ -1,10 +1,10 @@
 {
   "name": "@cardanowall/crypto-core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "Closed-catalogue cryptographic primitives for CIP-309 Proof-of-Existence (TypeScript reference implementation; byte-identical Python parity twin).",
   "license": "Apache-2.0",
-  "author": "Cardanowall <hello@cardanowall.com>",
+  "author": "CardanoWall <hello@cardanowall.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cardanowall/cip309-ts.git",
