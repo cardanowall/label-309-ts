@@ -1,7 +1,7 @@
-# Contributing to the CIP-309 TypeScript SDKs
+# Contributing to the Label 309 TypeScript SDKs
 
 Thank you for your interest in improving the TypeScript implementation of
-**CIP-309** — an open standard for **Proof of Existence (PoE)** anchored on the
+**Label 309** — an open standard for **Proof of Existence (PoE)** anchored on the
 Cardano blockchain.
 
 These packages are **pre-1.0**. They are **byte-parity twins** of the Python and
@@ -16,11 +16,11 @@ All contributions are made under the terms in [Licensing](#licensing) and the
 
 ## What belongs in this repository
 
-This repository is the **TypeScript SDK** for CIP-309, a pnpm workspace of three
+This repository is the **TypeScript SDK** for Label 309, a pnpm workspace of three
 packages:
 
 - `@cardanowall/crypto-core` — cryptographic primitives.
-- `@cardanowall/poe-standard` — the CIP-309 wire format (schema, encoder,
+- `@cardanowall/poe-standard` — the Label 309 wire format (schema, encoder,
   validator).
 - `@cardanowall/sdk-ts` — the high-level verifier + client + identity surface.
 
@@ -31,11 +31,11 @@ What does **not** belong here:
 
 - **Changes to the wire format, grammar, schemas, registries, or the
   conformance vectors** belong in the
-  [`cip309`](https://github.com/cardanowall/cip309) standard repository. The
+  [`label-309`](https://github.com/cardanowall/label-309) standard repository. The
   vectors are authoritative; a divergence between these packages and a vector is
   a bug in the package, not the vector.
 - **Issues in another implementation** belong in its repository —
-  `cip309-py` (PyPI), `cip309-rs` (crates.io), or `cip309-cli` (the
+  `label-309-py` (PyPI), `label-309-rs` (crates.io), or `label-309-cli` (the
   command-line tool).
 
 If you are unsure, open an issue here and ask.
@@ -57,12 +57,12 @@ CI runs exactly these. A pull request must pass all of them.
 
 ### Conformance and byte-parity
 
-Cross-implementation **byte-parity** is a core guarantee of CIP-309. The KAT and
+Cross-implementation **byte-parity** is a core guarantee of Label 309. The KAT and
 corpus vectors these packages load are byte-identical to those the Python and
 Rust SDKs load. Do not edit a vector to make a test pass: a vector mismatch
 means the implementation diverged from the standard. If you believe a vector
 itself is wrong, raise it in the
-[`cip309`](https://github.com/cardanowall/cip309) standard repository — the
+[`label-309`](https://github.com/cardanowall/label-309) standard repository — the
 vectors live there canonically.
 
 ---

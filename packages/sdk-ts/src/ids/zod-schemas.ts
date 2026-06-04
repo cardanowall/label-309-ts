@@ -1,4 +1,4 @@
-// Zod schema gating the CIP-309 record id at every parse boundary (HTTP route
+// Zod schema gating the Label 309 record id at every parse boundary (HTTP route
 // handlers, SDK input validation, OpenAPI registration).
 //
 // The regex is the strict Crockford-32 alphabet (lowercase only on the wire,

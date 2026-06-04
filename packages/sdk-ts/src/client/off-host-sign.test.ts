@@ -5,7 +5,7 @@
 //    `signerType: 'in-signature-kid'` for every vector.
 // 2. For the same record + seed, the off-host helper's chunk array
 //    byte-matches an inline reconstruction of the in-process
-//    `coseSign1Cip309Build` chunk array (the reconstruction is inlined here so
+//    `coseSign1Label309Build` chunk array (the reconstruction is inlined here so
 //    the SDK package tree stays free of any application-layer dependency).
 // 3. Input-validation boundary raises `OffHostSignError` with `code`
 //    discriminator for 31-byte pubkey / 63-byte signature.
@@ -19,7 +19,7 @@ import {
   decodeCanonicalCbor,
   type CanonicalCborValue,
 } from '@cardanowall/crypto-core/cbor';
-import { coseSign1Cip309Build } from '@cardanowall/crypto-core/cose';
+import { coseSign1Label309Build } from '@cardanowall/crypto-core/cose';
 import { signEd25519, getPublicKeyEd25519 } from '@cardanowall/crypto-core/sig';
 import { chunkBytes, encodeRecordBodyForSigning, type PoeRecord } from '@cardanowall/poe-standard';
 import { describe, expect, it } from 'vitest';
@@ -89,7 +89,7 @@ describe.each(corpus.cardano_poe_vectors)(
       // Inline reconstruction of the in-process path (no application-layer
       // import; preserves package-tree purity). The signer feeds
       // protectedHeader = {1:-8, 4:pub} + unprotectedHeader = {} + record body
-      // through `coseSign1Cip309Build` with the seed; the off-host helper
+      // through `coseSign1Label309Build` with the seed; the off-host helper
       // computes the SAME inputs and feeds them through `encodeCoseSign1` with
       // an externally-produced signature. Ed25519 is deterministic per
       // RFC 8032 §5.1.6, canonical-CBOR is byte-deterministic per RFC 8949
@@ -98,7 +98,7 @@ describe.each(corpus.cardano_poe_vectors)(
       const pub = getPublicKeyEd25519({ seed });
       expect(bytesToHex(pub)).toBe(vector.signer_public_key_hex);
       const recordBodyCbor = encodeRecordBodyForSigning(record);
-      const coseInProc = coseSign1Cip309Build({
+      const coseInProc = coseSign1Label309Build({
         protectedHeader: new Map<number | string, unknown>([
           [1, -8],
           [4, pub],

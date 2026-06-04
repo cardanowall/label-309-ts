@@ -4,17 +4,17 @@
 // Wire-format extension members:
 //   { "max": <int>, "got": <int> }
 
-import { Cip309HttpError, type Cip309HttpErrorInit } from './http-error';
+import { Label309HttpError, type Label309HttpErrorInit } from './http-error';
 
 function readInt(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-export class BatchTooLargeError extends Cip309HttpError {
+export class BatchTooLargeError extends Label309HttpError {
   public readonly max: number | undefined;
   public readonly got: number | undefined;
 
-  constructor(init: Cip309HttpErrorInit) {
+  constructor(init: Label309HttpErrorInit) {
     super(init);
     this.name = 'BatchTooLargeError';
     this.max = readInt(this.extensions['max']);

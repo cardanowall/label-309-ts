@@ -1,4 +1,4 @@
-// Every canonical-CBOR decode violation collapses to the single public CIP-309
+// Every canonical-CBOR decode violation collapses to the single public Label 309
 // taxonomy code MALFORMED_CBOR: indefinite-length (streaming) items, duplicate
 // keys, unsorted keys, non-minimal integer encodings, and invalid UTF-8 in text
 // strings. The taxonomy intentionally has one code for all of these; the

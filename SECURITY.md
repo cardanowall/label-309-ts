@@ -1,6 +1,6 @@
 # Security Policy
 
-The CIP-309 TypeScript SDKs implement a standard for cryptographic Proof of
+The Label 309 TypeScript SDKs implement a standard for cryptographic Proof of
 Existence. Their security properties matter to everyone who relies on a proof,
 so we take reports seriously and ask that they be handled responsibly.
 
@@ -24,9 +24,9 @@ In scope for a report here:
 Out of scope here (report it in the relevant repository instead):
 
 - A flaw or ambiguity in the **standard** itself — report it in the
-  [`cip309`](https://github.com/cardanowall/cip309) standard repository.
-- A bug in another implementation — `cip309-py`, `cip309-rs`, or the
-  `cip309-cli` command-line tool. Use that repository's security policy.
+  [`label-309`](https://github.com/cardanowall/label-309) standard repository.
+- A bug in another implementation — `label-309-py`, `label-309-rs`, or the
+  `label-309-cli` command-line tool. Use that repository's security policy.
 
 ## Core security goals
 
@@ -66,4 +66,4 @@ Please include, as far as you can:
 - Because these packages are **pre-1.0**, there are no long-term-supported
   released versions yet; fixes land on the current line.
 
-Thank you for helping keep CIP-309 trustworthy.
+Thank you for helping keep Label 309 trustworthy.

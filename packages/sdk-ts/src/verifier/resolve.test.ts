@@ -10,7 +10,7 @@ import { wrapFetchOutbound } from './fetch';
 import {
   extractLabel309Metadata,
   KOIOS_MAINNET_URL,
-  NotACip309RecordError,
+  NotALabel309RecordError,
   resolveCardanoTx,
 } from './resolve';
 import type {
@@ -125,7 +125,7 @@ describe('resolveCardanoTx — Koios error paths', () => {
     );
   });
 
-  it('throws NotACip309RecordError on empty array (and re-throws across gateway chain)', async () => {
+  it('throws NotALabel309RecordError on empty array (and re-throws across gateway chain)', async () => {
     const stub = mkStubFetch([(u) => (u.endsWith('/tx_cbor') ? jsonResponse([]) : undefined)]);
     const wrapped = wrapFetchOutbound(stub, [], undefined);
     const input: VerifyTxInput = {
@@ -134,7 +134,7 @@ describe('resolveCardanoTx — Koios error paths', () => {
       blockfrostProjectId: 'mainnet01abc',
     };
     await expect(resolveCardanoTx({ input, fetchFn: wrapped })).rejects.toBeInstanceOf(
-      NotACip309RecordError,
+      NotALabel309RecordError,
     );
   });
 });
@@ -238,7 +238,7 @@ describe('resolveCardanoTx — multi-gateway fallback', () => {
       blockfrostProjectId: 'mainnet01abc',
     };
     await expect(resolveCardanoTx({ input, fetchFn: wrapped })).rejects.toBeInstanceOf(
-      NotACip309RecordError,
+      NotALabel309RecordError,
     );
     expect(blockfrostCalls).toBe(0);
   });

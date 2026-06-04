@@ -1,5 +1,5 @@
 // Wire-format fields stay snake_case so JSON round-trips without translation;
-// SDK-introduced helper fields (Cip309ClientConfig, etc.) use camelCase.
+// SDK-introduced helper fields (Label309ClientConfig, etc.) use camelCase.
 //
 // Money on the wire: bigint USD micro-cents serialised as decimal strings
 // (1 USD = 1,000,000 micros). The SDK accepts and returns strings — callers
@@ -7,17 +7,17 @@
 
 export type FetchImpl = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
-export interface Cip309ClientConfig {
+export interface Label309ClientConfig {
   /**
    * Bearer credential, forwarded verbatim as `Authorization: Bearer <apiKey>`.
    *
    * Treated as an OPAQUE token: the SDK never parses, validates, or infers
-   * anything from it, since each CIP-309 gateway issues keys in its own format.
+   * anything from it, since each Label 309 gateway issues keys in its own format.
    * Omit for anonymous read-only usage.
    */
   readonly apiKey?: string;
   /**
-   * Base URL of the CIP-309 gateway, e.g. `https://gateway.example.com`.
+   * Base URL of the Label 309 gateway, e.g. `https://gateway.example.com`.
    * REQUIRED — the client is gateway-agnostic and has no default deployment.
    * Used VERBATIM (a single trailing slash is stripped). A missing or empty
    * value throws `InvalidClientConfigError` from the constructor.
@@ -379,7 +379,7 @@ export interface PublishContentInput {
   readonly content: Uint8Array | string;
   /** UUID returned by POST /api/v1/poe/quote. */
   readonly quoteId: string;
-  /** Hash algorithm registered in the CIP-309 hash registry. */
+  /** Hash algorithm registered in the Label 309 hash registry. */
   readonly hashAlg?: SupportedHashAlg;
   /** Optional signer — when omitted the record publishes unsigned (profile=core). */
   readonly signer?: Signer;
@@ -405,7 +405,7 @@ export interface PublishPrehashedInput {
 /**
  * Sealed-PoE helper input. Encrypts `content` to the supplied X25519
  * recipient public keys (age-style sealed envelope), uploads the ciphertext
- * to Arweave via /uploads, builds a CIP-309 record with the resulting
+ * to Arweave via /uploads, builds a Label 309 record with the resulting
  * `ar://` URI in `items[0].uris`, optionally signs it, and submits to
  * /publish.
  *

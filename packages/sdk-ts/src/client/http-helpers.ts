@@ -1,6 +1,6 @@
 // Shared response-handling helpers for the HTTP client namespaces (poe,
 // records, account). They parse the body, lift `X-Request-Id` /
-// `Retry-After`, and throw a typed `Cip309HttpError` on non-2xx the same
+// `Retry-After`, and throw a typed `Label309HttpError` on non-2xx the same
 // way, so the logic lives here once.
 
 import { parseHttpError } from './parse-http-error';
@@ -24,7 +24,7 @@ export function parseRetryAfter(header: string | null): number | undefined {
 }
 
 /**
- * Throw the most-specific `Cip309HttpError` subclass on a non-2xx
+ * Throw the most-specific `Label309HttpError` subclass on a non-2xx
  * response (decoding the RFC 7807 body, request id, and retry-after); no-op on
  * 2xx so callers can `await throwIfNotOk(res)` before reading the success body.
  */

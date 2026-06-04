@@ -117,7 +117,7 @@ export class RecordsNamespace {
   }
 
   /**
-   * Run the canonical CIP-309 verifier against the record at `txHash`.
+   * Run the canonical Label 309 verifier against the record at `txHash`.
    * Returns the same `VerifyReport` shape the standalone verifier emits —
    * `VerifyReport` IS the wire body of this endpoint, with no transformer in
    * between.

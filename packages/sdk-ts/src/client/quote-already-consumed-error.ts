@@ -6,16 +6,16 @@
 // Wire-format extension members (RFC 7807 §3.2):
 //   { "quote_id": "<uuid>" }
 
-import { Cip309HttpError, type Cip309HttpErrorInit } from './http-error';
+import { Label309HttpError, type Label309HttpErrorInit } from './http-error';
 
 function readString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-export class QuoteAlreadyConsumedError extends Cip309HttpError {
+export class QuoteAlreadyConsumedError extends Label309HttpError {
   public readonly quoteId: string | undefined;
 
-  constructor(init: Cip309HttpErrorInit) {
+  constructor(init: Label309HttpErrorInit) {
     super(init);
     this.name = 'QuoteAlreadyConsumedError';
     this.quoteId = readString(this.extensions['quote_id']);

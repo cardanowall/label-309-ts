@@ -8,10 +8,10 @@ import { signEd25519 } from '../sig/ed25519';
 
 import {
   CARDANO_POE_SIG_DOMAIN_PREFIX,
-  buildCip309SigStructure,
+  buildLabel309SigStructure,
   buildSigStructure,
-  coseSign1Cip309Build,
-  coseSign1Cip309Verify,
+  coseSign1Label309Build,
+  coseSign1Label309Verify,
   type CoseHeader,
 } from './sign1';
 
@@ -102,9 +102,9 @@ describe('cose-sign1 — Sig_structure build vectors', () => {
   }
 });
 
-describe('cose-sign1 — CIP-309 production vectors', () => {
+describe('cose-sign1 — Label 309 production vectors', () => {
   for (const vector of buildCorpus.cardano_poe_vectors) {
-    it(`builds byte-identical Sig_structure via buildCip309SigStructure for ${vector.name}`, () => {
+    it(`builds byte-identical Sig_structure via buildLabel309SigStructure for ${vector.name}`, () => {
       // Reconstruct the protected_bytes the builder will emit by hand-encoding
       // the {1: -8, 4: <pub>} map. The reference vector pins it as
       // a201270458203d4017c3...4660c (38 bytes).
@@ -115,7 +115,7 @@ describe('cose-sign1 — CIP-309 production vectors', () => {
         ),
       ]);
       // Reuse the production builder so we exercise the public surface end-to-end.
-      const cose = coseSign1Cip309Build({
+      const cose = coseSign1Label309Build({
         protectedHeader,
         unprotectedHeader: new Map(),
         recordBodyCbor: hexToBytes(vector.record_body_cbor_hex),
@@ -124,27 +124,27 @@ describe('cose-sign1 — CIP-309 production vectors', () => {
       expect(bytesToHex(cose)).toBe(vector.expected_cose_sign1_hex);
     });
 
-    it(`buildCip309SigStructure emits the spec-pinned Sig_structure for ${vector.name}`, () => {
-      // Each CIP-309 path-1 vector encodes protected = {1: -8, 4: <32B pub>},
+    it(`buildLabel309SigStructure emits the spec-pinned Sig_structure for ${vector.name}`, () => {
+      // Each Label 309 path-1 vector encodes protected = {1: -8, 4: <32B pub>},
       // whose canonical CBOR is the 38-byte prefix `a2 01 27 04 58 20 || <pub>`.
       // Build that hex per-vector so this test covers the reference vector
       // AND every fixture (which use distinct public keys).
       const protectedHex = `a201270458 20 ${vector.signer_public_key_hex}`.replace(/\s+/g, '');
-      const sigStructureBytes = buildCip309SigStructure({
+      const sigStructureBytes = buildLabel309SigStructure({
         bodyProtectedBytes: hexToBytes(protectedHex),
         recordBodyCbor: hexToBytes(vector.record_body_cbor_hex),
       });
       expect(bytesToHex(sigStructureBytes)).toBe(vector.expected_sig_structure_hex);
     });
 
-    it(`buildCip309SigStructure forces external_aad = h'' regardless of input bytes for ${vector.name}`, () => {
+    it(`buildLabel309SigStructure forces external_aad = h'' regardless of input bytes for ${vector.name}`, () => {
       // The helper does not accept an externalAad arg; assert that the produced
       // Sig_structure pins index-2 to a zero-length bstr (CBOR 0x40). The
       // protected_bytes for {1:-8, 4:<pub>} is always 38 bytes, so the layout is:
       // [0]=84 (array(4)), [1..11]="Signature1" (11 B), [12]=58, [13]=26,
       // [14..51]=protected (38 B), [52]=0x40 expected.
       const protectedHex = `a201270458 20 ${vector.signer_public_key_hex}`.replace(/\s+/g, '');
-      const sigStructureBytes = buildCip309SigStructure({
+      const sigStructureBytes = buildLabel309SigStructure({
         bodyProtectedBytes: hexToBytes(protectedHex),
         recordBodyCbor: hexToBytes(vector.record_body_cbor_hex),
       });
@@ -153,10 +153,10 @@ describe('cose-sign1 — CIP-309 production vectors', () => {
   }
 });
 
-describe('cose-sign1 — CIP-309 verify (round-trip)', () => {
+describe('cose-sign1 — Label 309 verify (round-trip)', () => {
   for (const vector of buildCorpus.cardano_poe_vectors) {
-    it(`coseSign1Cip309Verify accepts the spec-pinned message for ${vector.name}`, () => {
-      const result = coseSign1Cip309Verify({
+    it(`coseSign1Label309Verify accepts the spec-pinned message for ${vector.name}`, () => {
+      const result = coseSign1Label309Verify({
         message: hexToBytes(vector.expected_cose_sign1_hex),
         detachedRecordBodyCbor: hexToBytes(vector.record_body_cbor_hex),
       });
@@ -167,11 +167,11 @@ describe('cose-sign1 — CIP-309 verify (round-trip)', () => {
       }
     });
 
-    it(`coseSign1Cip309Verify rejects a body mutation as SIGNATURE_INVALID for ${vector.name}`, () => {
+    it(`coseSign1Label309Verify rejects a body mutation as SIGNATURE_INVALID for ${vector.name}`, () => {
       const mutatedBody = hexToBytes(vector.record_body_cbor_hex);
       // Flip the last byte (semantically alters the blake2b hash digest).
       mutatedBody[mutatedBody.length - 1] = (mutatedBody[mutatedBody.length - 1] ?? 0) ^ 0xff;
-      const result = coseSign1Cip309Verify({
+      const result = coseSign1Label309Verify({
         message: hexToBytes(vector.expected_cose_sign1_hex),
         detachedRecordBodyCbor: mutatedBody,
       });
@@ -182,18 +182,22 @@ describe('cose-sign1 — CIP-309 verify (round-trip)', () => {
 });
 
 // Sig_structure + signature byte-pin parity for the new vectors.
-describe('cose-sign1 — CIP-309 production vectors', () => {
-  const cip309Vectors = buildCorpus.cardano_poe_vectors.filter((v) => v.name.startsWith('cip309-'));
+describe('cose-sign1 — Label 309 production vectors', () => {
+  // The fixture vector ids use the `label309-` prefix, frozen byte-for-byte in
+  // the cross-SDK corpus, so this filter literal must match it exactly.
+  const label309Vectors = buildCorpus.cardano_poe_vectors.filter((v) =>
+    v.name.startsWith('label309-'),
+  );
 
-  it('corpus contains at least 3 CIP-309 vectors (cross-SDK parity gate)', () => {
-    expect(cip309Vectors.length).toBeGreaterThanOrEqual(3);
+  it('corpus contains at least 3 Label 309 vectors (cross-SDK parity gate)', () => {
+    expect(label309Vectors.length).toBeGreaterThanOrEqual(3);
   });
 
-  for (const vector of cip309Vectors) {
+  for (const vector of label309Vectors) {
     it(`Sig_structure bytes match KAT for ${vector.name}`, () => {
       // {1: -8, 4: <pub>} canonical CBOR = a2 01 27 04 58 20 <32B>.
       const protectedHex = `a201270458 20 ${vector.signer_public_key_hex}`.replace(/\s+/g, '');
-      const sigStructureBytes = buildCip309SigStructure({
+      const sigStructureBytes = buildLabel309SigStructure({
         bodyProtectedBytes: hexToBytes(protectedHex),
         recordBodyCbor: hexToBytes(vector.record_body_cbor_hex),
       });
@@ -201,7 +205,7 @@ describe('cose-sign1 — CIP-309 production vectors', () => {
     });
 
     it(`signature bytes match KAT (Ed25519 strict) for ${vector.name}`, () => {
-      const cose = coseSign1Cip309Build({
+      const cose = coseSign1Label309Build({
         protectedHeader: new Map<number | string, unknown>([
           ...vector.protected_header_int_int_pairs.map(([k, v]) => [k, v] as [number, number]),
           ...vector.protected_header_int_bytes_pairs.map(
@@ -223,7 +227,7 @@ describe('cose-sign1 — CIP-309 production vectors', () => {
       // seed never escapes the unlock-store closure.
       const captured: Uint8Array[] = [];
       const seed = hexToBytes(vector.signer_secret_key_hex);
-      const cose = coseSign1Cip309Build({
+      const cose = coseSign1Label309Build({
         protectedHeader: new Map<number | string, unknown>([
           ...vector.protected_header_int_int_pairs.map(([k, v]) => [k, v] as [number, number]),
           ...vector.protected_header_int_bytes_pairs.map(
@@ -245,7 +249,7 @@ describe('cose-sign1 — CIP-309 production vectors', () => {
 });
 
 describe('cose-sign1 — CoseSign1BuildError', () => {
-  const vector = buildCorpus.cardano_poe_vectors.find((v) => v.name.startsWith('cip309-'))!;
+  const vector = buildCorpus.cardano_poe_vectors.find((v) => v.name.startsWith('label309-'))!;
   const baseHeader = (): CoseHeader =>
     new Map<number | string, unknown>([
       ...vector.protected_header_int_int_pairs.map(([k, v]) => [k, v] as [number, number]),
@@ -256,7 +260,7 @@ describe('cose-sign1 — CoseSign1BuildError', () => {
 
   it('throws SIGNER_NOT_PROVIDED when neither seed nor closure supplied', () => {
     expect(() =>
-      coseSign1Cip309Build({
+      coseSign1Label309Build({
         protectedHeader: baseHeader(),
         unprotectedHeader: new Map(),
         recordBodyCbor: hexToBytes(vector.record_body_cbor_hex),
@@ -268,7 +272,7 @@ describe('cose-sign1 — CoseSign1BuildError', () => {
 
   it('throws SIGNER_AND_SEED_BOTH_PROVIDED when both are supplied', () => {
     expect(() =>
-      coseSign1Cip309Build({
+      coseSign1Label309Build({
         protectedHeader: baseHeader(),
         unprotectedHeader: new Map(),
         recordBodyCbor: hexToBytes(vector.record_body_cbor_hex),
@@ -285,7 +289,7 @@ describe('cose-sign1 — CoseSign1BuildError', () => {
 
   it('rejects a closure that returns a non-64-byte value', () => {
     expect(() =>
-      coseSign1Cip309Build({
+      coseSign1Label309Build({
         protectedHeader: baseHeader(),
         unprotectedHeader: new Map(),
         recordBodyCbor: hexToBytes(vector.record_body_cbor_hex),

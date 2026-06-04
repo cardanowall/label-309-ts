@@ -1,14 +1,14 @@
-# @cardanowall/crypto-core — closed-catalogue cryptographic primitives for CIP-309
+# @cardanowall/crypto-core — closed-catalogue cryptographic primitives for Label 309
 
-Low-level, independently auditable building blocks for [CIP-309](https://cips.cardano.org/)
+Low-level, independently auditable building blocks for [Label 309](https://cips.cardano.org/)
 Proof-of-Existence tooling: hash, KDF, signature, KEM, AEAD, canonical CBOR, COSE_Sign1,
 deterministic seed derivation, multi-recipient sealed-PoE construction, envelope discovery,
 RFC 9162 Merkle trees, and age-style recipient encoding.
 
 ## What it is
 
-`crypto-core` is the bottom layer of the CIP-309 package family. It is a **closed catalogue**:
-it exposes only the named, vetted algorithms the CIP-309 wire format references — there is no
+`crypto-core` is the bottom layer of the Label 309 package family. It is a **closed catalogue**:
+it exposes only the named, vetted algorithms the Label 309 wire format references — there is no
 general-purpose "bring your own algorithm" surface. Every construction is byte-pinned against
 known-answer test vectors so an independent implementation can reproduce identical bytes.
 
@@ -77,7 +77,7 @@ const ok = verifyEd25519({ publicKey, message, signature }); // true
 ```
 
 `deriveX25519KeypairFromSeed` and `deriveMlKem768X25519KeypairFromSeed` derive the encryption
-keypairs from the same 32-byte seed using fixed CIP-309 HKDF labels — so one passphrase-protected
+keypairs from the same 32-byte seed using fixed Label 309 HKDF labels — so one passphrase-protected
 seed yields a complete, deterministic identity.
 
 ### Seal a record to multiple recipients and unwrap it
@@ -144,7 +144,7 @@ Each group is also a subpath export. Names below are the actual exported symbols
 | `kem`         | `x25519Keygen` / `x25519PublicKey` / `x25519Ecdh` (RFC 7748, low-order-point rejection); `mlkem768x25519Keygen` / `…Encapsulate` / `…Decapsulate` (X-Wing hybrid PQ KEM) |
 | `aead`        | `chacha20Poly1305*` (RFC 8439), `xchacha20Poly1305*`, `aes256Gcm*`                                                                                                       |
 | `cbor`        | `encodeCanonicalCbor` / `decodeCanonicalCbor` (RFC 8949 §4.2.1) plus a permissive outer-wire decoder                                                                     |
-| `cose`        | `coseSign1Cip309Build` / `coseSign1Cip309Verify`, `encodeCoseSign1` / `decodeCoseSign1`, `buildCip309SigStructure` (COSE_Sign1, RFC 9052)                                |
+| `cose`        | `coseSign1Label309Build` / `coseSign1Label309Verify`, `encodeCoseSign1` / `decodeCoseSign1`, `buildLabel309SigStructure` (COSE_Sign1, RFC 9052)                          |
 | `seed-derive` | `deriveEd25519KeypairFromSeed`, `deriveX25519KeypairFromSeed`, `deriveMlKem768X25519KeypairFromSeed` — deterministic long-term identity keys from one 32-byte seed       |
 | `discovery`   | `derivePassphraseDiscoveryTag` (Argon2id → HMAC), `deriveWebauthnDiscoveryTagFromPrf` — envelope-discovery tags                                                          |
 | `sealed-poe`  | `eciesSealedPoeWrap` / `eciesSealedPoeUnwrap` / `eciesSealedPoeTrialDecrypt`, the slots codec, and `RecipientKeyBundle` (age-style ECIES with AEAD-bound slots)          |
@@ -159,7 +159,7 @@ See `src/index.ts` and each submodule's `index.ts` for the exhaustive surface.
 `crypto-core` is the TypeScript reference. Its outputs are byte-identical to the Python twin
 (`@cardanowall/sdk-py`) and the Rust twin (the `cardanowall` crate) across a shared set of
 known-answer test vectors — public standards-derived vectors (RFC 7748, RFC 8032, RFC 8439,
-RFC 8949, RFC 9106, FIPS 180-4) alongside the CIP-309 record, envelope, sealed-PoE, and
+RFC 8949, RFC 9106, FIPS 180-4) alongside the Label 309 record, envelope, sealed-PoE, and
 seed-derivation vectors. A divergence between any two implementations turns the parity check red.
 This is what lets a record sealed or signed by one implementation be opened or verified by any
 other, on any platform.
@@ -170,13 +170,13 @@ These primitives carry no notion of a publisher or a server. A sealed PoE is ope
 signature is verified, and a Merkle proof is checked entirely from bytes the caller already holds —
 the on-chain metadata, the optional content (or ciphertext) blob, and a recipient's own private
 key. There is no issuer server in the loop at any step. `cardanowall.com` is one example deployment
-of CIP-309 tooling; nothing here depends on it.
+of Label 309 tooling; nothing here depends on it.
 
 ## Relation to the other packages
 
 - **`@cardanowall/crypto-core`** (this package) — the closed-catalogue primitives; portable and
   independently auditable building blocks.
-- **`@cardanowall/poe-standard`** — the CIP-309 wire-format library: record schema, canonical-CBOR
+- **`@cardanowall/poe-standard`** — the Label 309 wire-format library: record schema, canonical-CBOR
   encoder, pure structural validator, and the error-code catalogue.
 - **`@cardanowall/sdk-ts`** — the browser + Node TypeScript SDK: the standalone verifier, the
   gateway-agnostic HTTP client, off-host signing, and seed-derived identity helpers.

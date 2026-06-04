@@ -1,25 +1,25 @@
-# @cardanowall/poe-standard — the CIP-309 wire-format library
+# @cardanowall/poe-standard — the Label 309 wire-format library
 
-The wire-format library for [CIP-309](https://cips.cardano.org/) Proof-of-Existence records: the
+The wire-format library for [Label 309](https://cips.cardano.org/) Proof-of-Existence records: the
 record schema, the canonical-CBOR encoder, the pure structural validator, and the canonical
 error-code catalogue. Pure functions over bytes — no I/O, no network, no clock.
 
 ## What it is
 
 This package owns the **bytes**. It builds the exact canonical CBOR that goes on chain under Cardano
-metadata label 309, and it decides whether an arbitrary byte string is a structurally valid CIP-309
-record. It is the **structural validator** of the three CIP-309 verifier roles: a pure function over
+metadata label 309, and it decides whether an arbitrary byte string is a structurally valid Label 309
+record. It is the **structural validator** of the three Label 309 verifier roles: a pure function over
 CBOR bytes, with no cryptographic signature checks, no chain resolution, and no decryption — those
 belong to the verifier layer in [`@cardanowall/sdk-ts`](https://www.npmjs.com/package/@cardanowall/sdk-ts)
 and its byte-parity twins.
 
-Everything here is deterministic and side-effect-free, which is what makes a CIP-309 proof
+Everything here is deterministic and side-effect-free, which is what makes a Label 309 proof
 independently checkable: the same bytes always encode to the same record and validate to the same
 result, in any implementation, against shared test vectors.
 
 ## Install
 
-The CIP-309 TypeScript packages are pre-1.0 and not yet published to npm. Build from the workspace:
+The Label 309 TypeScript packages are pre-1.0 and not yet published to npm. Build from the workspace:
 
 ```sh
 pnpm install
@@ -83,7 +83,7 @@ import { encodeRecordBodyForSigning, type PoeRecord } from '@cardanowall/poe-sta
 
 const record: PoeRecord = { v: 1, items: [{ hashes: { 'sha2-256': digest } }] };
 
-// record_body = the full record map MINUS sigs. Producers prepend the CIP-309
+// record_body = the full record map MINUS sigs. Producers prepend the Label 309
 // domain-separation prefix and wrap the result in a COSE Sig_structure before
 // signing with Ed25519 (see @cardanowall/crypto-core for the COSE helper).
 const body: Uint8Array = encodeRecordBodyForSigning(record);
@@ -91,7 +91,7 @@ const body: Uint8Array = encodeRecordBodyForSigning(record);
 
 ## Records on chain: chunk → validate
 
-The Cardano ledger caps every metadata byte string and text string at 64 bytes, so a CIP-309 record
+The Cardano ledger caps every metadata byte string and text string at 64 bytes, so a Label 309 record
 is stored as an **array of ≤64-byte CBOR-bytes chunks** under label 309, and the metadata map itself
 is wrapped in the Conway tag-259 form. A verifier reassembles the chunk array (and unwraps tag-259)
 before calling `validatePoeRecord` — the validator operates on the single reconstructed record byte
@@ -122,7 +122,7 @@ The package root re-exports every group. Subpath imports are available for `./sc
 
 - `validatePoeRecord(bytes)` — the structural pipeline: canonical decode → schema parse → cross-field
   domain checks. Returns a discriminated `ValidateResult`; never throws.
-- `validateCidProfile(cid)` — offline IPFS CID-profile parser (CIDv0 and the CIP-309 CIDv1 multibase
+- `validateCidProfile(cid)` — offline IPFS CID-profile parser (CIDv0 and the Label 309 CIDv1 multibase
   / multicodec / multihash profile).
 - `type ValidateResult`, `type ValidationIssue`.
 
@@ -180,13 +180,13 @@ const record: PoeRecord = {
 };
 ```
 
-The validator enforces the CIP-309 registries (hash algorithms, AEAD, KEM, Merkle commitment, and
+The validator enforces the Label 309 registries (hash algorithms, AEAD, KEM, Merkle commitment, and
 passphrase-KDF), rejects unauthenticated ciphers by name, pins each KEM's recipient-slot shape, and
 guards against publishing private key material on chain.
 
 ## Cross-implementation parity
 
-The encoder and validator are byte-identical across the CIP-309 implementations —
+The encoder and validator are byte-identical across the Label 309 implementations —
 `@cardanowall/poe-standard` (TS), the Python twin, and the Rust crate — validated against the same
 shared canonical-CBOR known-answer test vectors. Encoding the same record yields byte-identical CBOR
 in every implementation; validating the same bytes yields the same ordered list of issue codes with
@@ -194,7 +194,7 @@ the same severities. That parity is what lets a proof published by one tool veri
 
 ## Standard / service independence
 
-A CIP-309 proof is verifiable from transaction metadata, the optional content bytes, and a public
+A Label 309 proof is verifiable from transaction metadata, the optional content bytes, and a public
 blockchain explorer — no issuer server is required. This package is the structural half of that
 guarantee: given the reassembled record bytes, `validatePoeRecord` decides structural validity
 offline, with no trust in the publisher, the gateway, or any domain. Signature verification, chain
@@ -206,7 +206,7 @@ in the SDKs.
 - **`@cardanowall/crypto-core`** — closed-catalogue cryptographic primitives (hash, KDF, signature,
   KEM, AEAD, CBOR, COSE, sealed-PoE, Merkle). Supplies the canonical CBOR codec and COSE decoder this
   package builds on.
-- **`@cardanowall/poe-standard`** — this package: the CIP-309 wire format (schema, encoder, structural
+- **`@cardanowall/poe-standard`** — this package: the Label 309 wire format (schema, encoder, structural
   validator, error codes).
 - **`@cardanowall/sdk-ts`** — the browser + Node SDK: the standalone verifier (all three roles), the
   gateway-agnostic HTTP client, off-host signing, and seed-derived identity helpers.

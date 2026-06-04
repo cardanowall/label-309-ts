@@ -1,4 +1,4 @@
-// Catalogue invariants for the CIP-309 v1 error-code taxonomy.
+// Catalogue invariants for the Label 309 v1 error-code taxonomy.
 
 import { describe, expect, it } from 'vitest';
 

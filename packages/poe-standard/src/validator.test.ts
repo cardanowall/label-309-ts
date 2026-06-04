@@ -1,4 +1,4 @@
-// CIP-309 v1 validator unit tests — domain-pass coverage.
+// Label 309 v1 validator unit tests — domain-pass coverage.
 //
 // Each test constructs a CBOR record in-test (no fixture-file dependency),
 // runs `validatePoeRecord`, and asserts the exact structural code emitted.
@@ -224,7 +224,7 @@ describe('validatePoeRecord — hash-map domain checks', () => {
     expect(emittedCodes(result)).toContain('HASH_DIGEST_LENGTH_MISMATCH');
   });
 
-  it('accepts a single-hash record (CIP-309 v1 — no SINGLE_HASH warning)', () => {
+  it('accepts a single-hash record (Label 309 v1 — no SINGLE_HASH warning)', () => {
     const bytes = encodePoeRecord({
       v: 1,
       items: [{ hashes: { 'sha2-256': hash32() } }],

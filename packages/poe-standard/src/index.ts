@@ -1,6 +1,6 @@
-// CIP-309 v1 Proof-of-Existence record — public surface.
+// Label 309 v1 Proof-of-Existence record — public surface.
 //
-// Implements the CIP-309 wire format and its Part A structural validator.
+// Implements the Label 309 wire format and its Part A structural validator.
 //
 // The package exports:
 //   - The Zod schemas + inferred types for every wire-format role.

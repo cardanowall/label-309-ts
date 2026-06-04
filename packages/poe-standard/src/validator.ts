@@ -1,4 +1,4 @@
-// CIP-309 v1 structural validator (the Part A structural-validation role).
+// Label 309 v1 structural validator (the Part A structural-validation role).
 //
 // Pure function over CBOR bytes — performs no I/O, opens no socket, decodes
 // no ciphertext. Cryptographic signature verification, chain resolution, URI
@@ -469,7 +469,7 @@ function validateOneUri(
     const cid = slashIdx === -1 ? rest : rest.slice(0, slashIdx);
     if (!validateCidProfile(cid)) {
       errors.push(
-        issue('INVALID_URI', path, 'ipfs:// URI is not a valid CID under the CIP-309 profile'),
+        issue('INVALID_URI', path, 'ipfs:// URI is not a valid CID under the Label 309 profile'),
       );
     }
     return;
@@ -542,7 +542,7 @@ function checkItemEnc(item: ItemEntry, idx: number, errors: ValidationIssue[]): 
       issue(
         'UNAUTHENTICATED_CIPHER_FORBIDDEN',
         [...basePath, 'aead'],
-        `'${enc.aead}' is an unauthenticated cipher; CIP-309 mandates an authenticated (AEAD) cipher`,
+        `'${enc.aead}' is an unauthenticated cipher; Label 309 mandates an authenticated (AEAD) cipher`,
       ),
     );
     return; // unrecoverable — nonce / kem / slot checks become noise
@@ -1048,7 +1048,7 @@ function inspectCoseKey(keyChunks: ReadonlyArray<Uint8Array>, i: number): Valida
 }
 
 // =============================================================================
-// CIP-309 CID profile
+// Label 309 CID profile
 // =============================================================================
 //
 // Accept CIDv0 (`Qm` prefix, 46-char base58btc, sha2-256 multihash) and
@@ -1058,7 +1058,7 @@ function inspectCoseKey(keyChunks: ReadonlyArray<Uint8Array>, i: number): Valida
 //   - Multicodec: 0x55 (raw), 0x70 (dag-pb), 0x71 (dag-cbor)
 //   - Multihash: 0x12 (sha2-256, 32 B), 0xb220 (blake2b-256, 32 B)
 //
-// Returns true iff the CID conforms to the CIP-309 profile.
+// Returns true iff the CID conforms to the Label 309 profile.
 
 const ACCEPTED_CIDV1_MULTIBASE: ReadonlySet<string> = new Set(['b', 'B', 'f', 'F', 'z']);
 
@@ -1123,7 +1123,7 @@ function readVarint(bytes: Uint8Array, start: number): { value: number; next: nu
     i++;
     if ((b & 0x80) === 0) return { value, next: i };
     shift += 7;
-    if (shift > 28) return null; // overflow guard; CIP-309 profile uses ≤ 16-bit codes
+    if (shift > 28) return null; // overflow guard; Label 309 profile uses ≤ 16-bit codes
   }
   return null;
 }

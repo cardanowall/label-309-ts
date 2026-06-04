@@ -12,7 +12,7 @@ import { CoseVerifyError, type CoseVerifyResult } from './errors';
 
 export type CoseHeader = Map<number | string, unknown>;
 
-// CIP-309 v1 domain separator embedded as a prefix on `Sig_structure[3]`
+// Label 309 v1 domain separator embedded as a prefix on `Sig_structure[3]`
 // (`to_sign`). The separator is
 // NOT placed in `Sig_structure[2]` (`external_aad`) because CIP-30 `signData`
 // — the only realistic wallet-signing path on Cardano — explicitly forbids a
@@ -58,8 +58,8 @@ export interface BuildSigStructureArgs {
 }
 
 // Raw RFC 9052 §4.4 Sig_structure builder. General-purpose: callers control
-// `external_aad` and `payload` exactly. For CIP-309 record signing use
-// `buildCip309SigStructure` instead — it enforces the CIP-309 record-signature invariants.
+// `external_aad` and `payload` exactly. For Label 309 record signing use
+// `buildLabel309SigStructure` instead — it enforces the Label 309 record-signature invariants.
 export function buildSigStructure(args: BuildSigStructureArgs): Uint8Array {
   return encodeCanonicalCbor([
     args.context,
@@ -69,19 +69,19 @@ export function buildSigStructure(args: BuildSigStructureArgs): Uint8Array {
   ] as readonly CanonicalCborValue[]);
 }
 
-export interface BuildCip309SigStructureArgs {
+export interface BuildLabel309SigStructureArgs {
   readonly bodyProtectedBytes: Uint8Array;
   // Canonical CBOR of the record body with `sigs` removed.
   readonly recordBodyCbor: Uint8Array;
 }
 
-// CIP-309 v1 specialisation of `Sig_structure` (RFC 9052 §4.4 base structure):
+// Label 309 v1 specialisation of `Sig_structure` (RFC 9052 §4.4 base structure):
 //   to_sign       = utf8("cardano-poe-record-sig-v1") || canonical_cbor(record_body_minus_sigs)
 //   Sig_structure = [ "Signature1", body_protected, h'' (empty), to_sign ]
 // Always forces `external_aad = h''` (empty bstr) — the CIP-30 wallet path
 // cannot carry a non-empty `external_aad`, so the domain separator lives in
 // `Sig_structure[3]` rather than `Sig_structure[2]`.
-export function buildCip309SigStructure(args: BuildCip309SigStructureArgs): Uint8Array {
+export function buildLabel309SigStructure(args: BuildLabel309SigStructureArgs): Uint8Array {
   const toSign = new Uint8Array(
     CARDANO_POE_SIG_DOMAIN_PREFIX_BYTES.length + args.recordBodyCbor.length,
   );
@@ -165,7 +165,7 @@ export function decodeCoseSign1(bytes: Uint8Array): CoseSign1Decoded {
     }
     // Empty protected header MUST encode as the single byte 0x40 (zero-length bstr),
     // not 0x41 0xA0 (a 1-byte bstr containing an empty CBOR map). RFC 9052 §3 +
-    // CIP-309 canonical-CBOR mandate.
+    // Label 309 canonical-CBOR mandate.
     if (ph.size === 0) {
       throw new CoseVerifyError(
         'MALFORMED_SIG_COSE',
@@ -195,7 +195,7 @@ export class CoseSign1BuildError extends Error {
   }
 }
 
-export interface CoseSign1Cip309BuildArgs {
+export interface CoseSign1Label309BuildArgs {
   readonly protectedHeader: CoseHeader;
   readonly unprotectedHeader: CoseHeader;
   // Canonical CBOR of the record body with `sigs` removed. The
@@ -212,29 +212,29 @@ export interface CoseSign1Cip309BuildArgs {
   readonly signer?: (sigStructureBytes: Uint8Array) => Uint8Array;
 }
 
-// CIP-309 v1 record-signature builder:
+// Label 309 v1 record-signature builder:
 //   1. compute `to_sign = utf8("cardano-poe-record-sig-v1") || recordBodyCbor`
 //   2. Sig_structure = [ "Signature1", bodyProtected, h'', to_sign ]
 //   3. Ed25519-sign Sig_structure (via seed OR injected closure)
 //   4. emit COSE_Sign1 with payload = CBOR null (detached signature, mandatory)
-export function coseSign1Cip309Build(args: CoseSign1Cip309BuildArgs): Uint8Array {
+export function coseSign1Label309Build(args: CoseSign1Label309BuildArgs): Uint8Array {
   if (args.signerSecretKey === undefined && args.signer === undefined) {
     throw new CoseSign1BuildError(
       'SIGNER_NOT_PROVIDED',
-      'coseSign1Cip309Build requires either signerSecretKey or signer',
+      'coseSign1Label309Build requires either signerSecretKey or signer',
     );
   }
   if (args.signerSecretKey !== undefined && args.signer !== undefined) {
     throw new CoseSign1BuildError(
       'SIGNER_AND_SEED_BOTH_PROVIDED',
-      'coseSign1Cip309Build accepts signerSecretKey XOR signer (not both)',
+      'coseSign1Label309Build accepts signerSecretKey XOR signer (not both)',
     );
   }
   const protectedBytes =
     args.protectedHeader.size === 0
       ? EMPTY_BYTES
       : encodeCanonicalCbor(args.protectedHeader as CanonicalCborValue);
-  const sigStructureBytes = buildCip309SigStructure({
+  const sigStructureBytes = buildLabel309SigStructure({
     bodyProtectedBytes: protectedBytes,
     recordBodyCbor: args.recordBodyCbor,
   });
@@ -258,7 +258,7 @@ export function coseSign1Cip309Build(args: CoseSign1Cip309BuildArgs): Uint8Array
   });
 }
 
-export interface CoseSign1Cip309VerifyArgs {
+export interface CoseSign1Label309VerifyArgs {
   readonly message: Uint8Array;
   // Canonical CBOR of the record body with `sigs` removed (verifier-recomputed;
   // the 25-byte UTF-8 prefix is prepended internally — callers
@@ -270,7 +270,7 @@ export interface CoseSign1Cip309VerifyArgs {
   readonly expectedSignerKey?: Uint8Array;
 }
 
-// CIP-309 v1 record-signature verifier:
+// Label 309 v1 record-signature verifier:
 //   - Decode COSE_Sign1
 //   - Reject COSE_Sign1[2] != CBOR null (attached payload — including h'') as
 //     MALFORMED_SIG_COSE_SIGN1
@@ -278,11 +278,11 @@ export interface CoseSign1Cip309VerifyArgs {
 //   - Sig_structure = [ "Signature1", protectedBytes, h'', to_sign ]
 //   - Strict Ed25519 verify (RFC 8032 §5.1.7 — `zip215: false` per ed25519.ts)
 //
-// The verifier does NOT accept an `externalAad` argument: CIP-309 v1 pins
+// The verifier does NOT accept an `externalAad` argument: Label 309 v1 pins
 // `external_aad = h''` and any deviation would either silently weaken the
 // domain separator or quietly accept malformed records. If a future CIP
 // revision re-enables external_aad, this helper takes a v-bump.
-export function coseSign1Cip309Verify(args: CoseSign1Cip309VerifyArgs): CoseVerifyResult {
+export function coseSign1Label309Verify(args: CoseSign1Label309VerifyArgs): CoseVerifyResult {
   let decoded: CoseSign1Decoded;
   try {
     decoded = decodeCoseSign1(args.message);
@@ -298,7 +298,7 @@ export function coseSign1Cip309Verify(args: CoseSign1Cip309VerifyArgs): CoseVeri
     }
     throw e;
   }
-  // CIP-309 v1 mandate: COSE_Sign1[2] (payload field) MUST be CBOR `null` (0xF6).
+  // Label 309 v1 mandate: COSE_Sign1[2] (payload field) MUST be CBOR `null` (0xF6).
   // Any non-null payload — including a zero-length byte string `h''` — MUST
   // be rejected as MALFORMED_SIG_COSE_SIGN1.
   if (decoded.payload !== null) {
@@ -368,7 +368,7 @@ export function coseSign1Cip309Verify(args: CoseSign1Cip309VerifyArgs): CoseVeri
       payload: hashedPayload,
     });
   } else {
-    sigStructureBytes = buildCip309SigStructure({
+    sigStructureBytes = buildLabel309SigStructure({
       bodyProtectedBytes: decoded.protectedBytes,
       recordBodyCbor: args.detachedRecordBodyCbor,
     });

@@ -1,4 +1,4 @@
-// CIP-309 v1 PoE record Zod schemas.
+// Label 309 v1 PoE record Zod schemas.
 //
 // Scope: structural shape gate. The schema enforces per-field types, length
 // bounds (chunk size, digest length, supersedes length, nonce length,

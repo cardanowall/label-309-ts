@@ -11,7 +11,7 @@ import {
   encodeCanonicalCbor,
   type CanonicalCborValue,
 } from '@cardanowall/crypto-core/cbor';
-import { coseSign1Cip309Build } from '@cardanowall/crypto-core/cose';
+import { coseSign1Label309Build } from '@cardanowall/crypto-core/cose';
 import { merkleSha2256Root, sha256 } from '@cardanowall/crypto-core/hash';
 import { x25519PublicKey } from '@cardanowall/crypto-core/kem';
 import { eciesSealedPoeWrap } from '@cardanowall/crypto-core/sealed-poe';
@@ -157,7 +157,7 @@ function buildFixture(opts: BuildFixtureOpts): Fixture {
     const pub = getPublicKeyEd25519({ seed });
     recordSignerPub = bytesToHex(pub);
     // Build the record body MINUS sigs and sign over canonical-CBOR(body)
-    // with the v1 domain prefix — `coseSign1Cip309Build` handles the prefix
+    // with the v1 domain prefix — `coseSign1Label309Build` handles the prefix
     // and Sig_structure construction.
     const tempRecord = PoeRecordSchema.parse({ ...recordValue });
     const recordBodyCbor = encodeRecordBodyForSigning(tempRecord);
@@ -165,7 +165,7 @@ function buildFixture(opts: BuildFixtureOpts): Fixture {
       [1, -8],
       [4, pub],
     ]);
-    let cose = coseSign1Cip309Build({
+    let cose = coseSign1Label309Build({
       protectedHeader,
       unprotectedHeader: new Map(),
       recordBodyCbor,

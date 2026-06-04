@@ -117,7 +117,7 @@ export class PoeNamespace {
    * publish time against the locked price snapshot.
    *
    * On HTTP-level failure (auth, rate limit, malformed request) this throws
-   * a typed `Cip309HttpError` subclass. Per-file failures inside a 200
+   * a typed `Label309HttpError` subclass. Per-file failures inside a 200
    * response are NOT thrown by `uploads()` itself — the response body is
    * returned verbatim so the caller can decide how to react. The
    * higher-level helpers (`publishSealed`, `publishMerkle`) treat any failed
@@ -208,7 +208,7 @@ export class PoeNamespace {
 
   /**
    * High-level hash-only publish: hash the supplied content, build a
-   * single-item CIP-309 record, optionally sign it with the caller-supplied
+   * single-item Label 309 record, optionally sign it with the caller-supplied
    * signer, and submit. No Arweave, no storage round-trip — anchors the
    * digest only.
    */
@@ -228,7 +228,7 @@ export class PoeNamespace {
   /**
    * Sealed-PoE: encrypt the supplied content to the recipient X25519 public
    * keys (age-style sealed envelope), upload the ciphertext to Arweave via
-   * /uploads, build a CIP-309 record with the resulting `ar://` URI, sign
+   * /uploads, build a Label 309 record with the resulting `ar://` URI, sign
    * it (optional), and submit via /publish.
    *
    * The sender SHOULD include their own X25519 public key in `recipients`

@@ -1,4 +1,4 @@
-// Zod-schema unit tests for the CIP-309 v1 wire shape.
+// Zod-schema unit tests for the Label 309 v1 wire shape.
 //
 // Cross-field semantics and registry-membership checks live in
 // `validator.test.ts`; this file pins ONLY the schema-layer behaviour

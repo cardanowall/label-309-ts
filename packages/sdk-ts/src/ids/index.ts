@@ -3,7 +3,7 @@
 //
 // The generic prefixed-id codec (Crockford-base32 + encode/decode) is exposed
 // for any gateway that mints Stripe-style `<prefix>_<base32>` ids; the only
-// schema shipped is `PoeIdSchema`, since the CIP-309 record id is the one
+// schema shipped is `PoeIdSchema`, since the Label 309 record id is the one
 // prefixed id the standard itself defines.
 
 export {

@@ -1,4 +1,4 @@
-// Public Merkle namespace for the CIP-309 SDK.
+// Public Merkle namespace for the Label 309 SDK.
 //
 // The `@cardanowall/crypto-core` package stays `private: true` (it is the
 // internal cryptographic library — closed-catalogue primitives gated by the

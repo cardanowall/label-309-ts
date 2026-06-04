@@ -1,7 +1,7 @@
 // RFC 7807 `application/problem+json` envelope and the typed error class
 // hierarchy the SDK throws on every non-2xx response.
 //
-// Every CIP-309 gateway `/api/v1/*` route emits the canonical shape:
+// Every Label 309 gateway `/api/v1/*` route emits the canonical shape:
 //
 //   Content-Type: application/problem+json
 //   {
@@ -41,7 +41,7 @@ export interface ProblemErrorEntry {
 }
 
 /**
- * RFC 7807 `application/problem+json` document as emitted by every CIP-309
+ * RFC 7807 `application/problem+json` document as emitted by every Label 309
  * gateway `/api/v1/*` route.
  *
  * Canonical fields (`type`, `title`, `status`, `detail`, `code`, `trace_id`)
@@ -49,7 +49,7 @@ export interface ProblemErrorEntry {
  * `instance` is optional per RFC 7807 §3.1.
  *
  * Additional top-level fields are RFC 7807 §3.2 extension members and are
- * preserved verbatim on `Cip309HttpError.extensions`.
+ * preserved verbatim on `Label309HttpError.extensions`.
  */
 export interface ProblemDetails {
   readonly type: string;
@@ -91,7 +91,7 @@ export function extractProblemExtensions(problem: ProblemDetails): Record<string
   return out;
 }
 
-export interface Cip309HttpErrorInit {
+export interface Label309HttpErrorInit {
   /** The verbatim problem document. */
   readonly problem: ProblemDetails;
   /** Pre-split extension members. Computed from `problem` when omitted. */
@@ -113,7 +113,7 @@ export interface Cip309HttpErrorInit {
  *   - `instanceof <SpecificError>` — see the subclasses re-exported from
  *     `@cardanowall/sdk-ts`
  */
-export class Cip309HttpError extends Error {
+export class Label309HttpError extends Error {
   public readonly problem: ProblemDetails;
   public readonly code: string;
   public readonly httpStatus: number;
@@ -127,9 +127,9 @@ export class Cip309HttpError extends Error {
   public readonly requestId: string;
   public readonly retryAfterSeconds: number | undefined;
 
-  constructor(init: Cip309HttpErrorInit) {
+  constructor(init: Label309HttpErrorInit) {
     super(init.problem.detail || `${init.problem.title} (HTTP ${init.problem.status})`);
-    this.name = 'Cip309HttpError';
+    this.name = 'Label309HttpError';
     this.problem = init.problem;
     this.code = init.problem.code;
     this.httpStatus = init.problem.status;

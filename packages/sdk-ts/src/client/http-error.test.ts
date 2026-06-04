@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { BatchEmptyError } from './batch-empty-error';
 import { BatchTooLargeError } from './batch-too-large-error';
 import { ForbiddenError } from './forbidden-error';
-import { Cip309HttpError } from './http-error';
+import { Label309HttpError } from './http-error';
 import { IdempotencyConflictError } from './idempotency-conflict-error';
 import { InsufficientFundsError } from './insufficient-funds-error';
 import { InsufficientScopeError } from './insufficient-scope-error';
@@ -38,7 +38,7 @@ function problemBody(overrides: Record<string, unknown>): Record<string, unknown
   };
 }
 
-describe('Cip309HttpError envelope projection', () => {
+describe('Label309HttpError envelope projection', () => {
   it('preserves the verbatim problem document and projects canonical fields', () => {
     const body = problemBody({
       type: 'https://cardanowall.com/problems/insufficient-funds',
@@ -80,7 +80,7 @@ describe('Cip309HttpError envelope projection', () => {
 
   it('synthesises a minimal problem document for non-RFC-7807 bodies', () => {
     const err = parseHttpError({ httpStatus: 418, body: null });
-    expect(err).toBeInstanceOf(Cip309HttpError);
+    expect(err).toBeInstanceOf(Label309HttpError);
     // Synthesised; falls back to a stable surrogate code so consumers can
     // dispatch without crashing on missing fields:
     expect(err.code).toBe('http-418');
@@ -106,7 +106,7 @@ describe('parseHttpError dispatch by code', () => {
       body: problemBody({ code: 'unauthorized', status: 401 }),
     });
     expect(err).toBeInstanceOf(UnauthorizedError);
-    expect(err).toBeInstanceOf(Cip309HttpError);
+    expect(err).toBeInstanceOf(Label309HttpError);
   });
 
   it('forbidden → ForbiddenError; csrf-invalid → ForbiddenError', () => {
@@ -308,12 +308,12 @@ describe('parseHttpError dispatch by code', () => {
     expect(err.retryAfterSeconds).toBe(30);
   });
 
-  it('unknown code falls through to Cip309HttpError with the verbatim body', () => {
+  it('unknown code falls through to Label309HttpError with the verbatim body', () => {
     const err = parseHttpError({
       httpStatus: 451,
       body: problemBody({ code: 'unavailable-for-legal-reasons', status: 451 }),
     });
-    expect(err).toBeInstanceOf(Cip309HttpError);
+    expect(err).toBeInstanceOf(Label309HttpError);
     // Subclass-specific instanceof check: NOT one of the typed subclasses
     expect(err).not.toBeInstanceOf(InternalServerError);
     expect(err.code).toBe('unavailable-for-legal-reasons');

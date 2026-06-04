@@ -1,4 +1,4 @@
-// Raised synchronously from the Cip309Client constructor when the config
+// Raised synchronously from the Label309Client constructor when the config
 // cannot be resolved into a usable gateway target. The single trigger: a
 // missing or empty `baseUrl`. The client is gateway-agnostic and has no default
 // deployment, so a base URL must always be supplied. The `apiKey` is an opaque

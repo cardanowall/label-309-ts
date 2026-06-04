@@ -5,7 +5,7 @@ Per-wallet `COSE_Sign1` verification fixtures driving the KAT test at
 Nami, Typhon, Yoroi, NuFi) × four variants (`positive`, `tampered-address`,
 `missing-address`, `wrong-network-header`) = **24 byte-pinned JSON fixtures**.
 
-The Python SDK ([`cip309-py`](https://github.com/cardanowall/cip309-py)) keeps a
+The Python SDK ([`label-309-py`](https://github.com/cardanowall/label-309-py)) keeps a
 byte-identical copy of these fixtures so the TypeScript and Python verifiers stay
 in exact agreement.
 
@@ -131,7 +131,7 @@ fails — asserted by the strictness of `decodeCoseSign1` / `parseCoseKeyEd25519
 The reviewer either:
 
 1. Pushes the wallet vendor to fix it and rolls back the wallet version; OR
-2. Amends CIP-309 to accommodate the new encoding (a normative spec change); OR
+2. Amends Label 309 to accommodate the new encoding (a normative spec change); OR
 3. Re-captures the positive fixture from the new wallet build — recording a fresh
    `signData` result against a real mainnet account and replacing the committed
    JSON byte-for-byte — then re-runs `UPDATE=1` to regenerate the tamper

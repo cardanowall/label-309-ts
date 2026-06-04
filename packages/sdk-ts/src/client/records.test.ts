@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { Cip309Client } from './cip309-client';
+import { Label309Client } from './label-309-client';
 import { RecordNotFoundError } from './record-not-found-error';
 import type { RecordResource } from './types';
 import type { VerifyReport } from '../verifier/types';
@@ -39,8 +39,8 @@ function problemResponse(body: Record<string, unknown>, status: number): Respons
   });
 }
 
-function makeClient(fetchMock: ReturnType<typeof vi.fn>): Cip309Client {
-  return new Cip309Client({
+function makeClient(fetchMock: ReturnType<typeof vi.fn>): Label309Client {
+  return new Label309Client({
     apiKey: `sk-cw-live-${'a'.repeat(52)}`,
     baseUrl: 'http://test.example',
     fetch: fetchMock as unknown as typeof globalThis.fetch,
@@ -322,7 +322,7 @@ describe('RecordsNamespace request-shape parity fixture', () => {
     };
 
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(recordFixture()));
-    const client = new Cip309Client({
+    const client = new Label309Client({
       apiKey: `sk-cw-live-${'b'.repeat(52)}`,
       baseUrl: 'http://test.example',
       fetch: fetchMock as unknown as typeof globalThis.fetch,

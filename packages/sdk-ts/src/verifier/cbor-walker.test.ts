@@ -1,5 +1,5 @@
 // Regression — Cardano caps every metadata bstr/tstr at 64 bytes, so any
-// CIP-309 record larger than 64 bytes is emitted as a `bytes-chunk-array`
+// Label 309 record larger than 64 bytes is emitted as a `bytes-chunk-array`
 // at the label-309 value position. The verifier's
 // `sliceLabel309Value` MUST reassemble the chunks before handing the bytes
 // to `validatePoeRecord`; without that the canonical-CBOR decoder sees a

@@ -1,4 +1,4 @@
-// CIP-309 v1 validator — positive KAT corpus (in-test records).
+// Label 309 v1 validator — positive KAT corpus (in-test records).
 //
 // Each case builds a record in-test and verifies the round-trip property
 //   validate(encode(R)).ok === true && validate(encode(R)).record ≡ R

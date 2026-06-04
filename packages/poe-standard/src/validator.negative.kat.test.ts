@@ -1,4 +1,4 @@
-// CIP-309 v1 validator — negative KAT corpus (one in-test record per
+// Label 309 v1 validator — negative KAT corpus (one in-test record per
 // structural code the validator emits).
 //
 // Each case constructs a minimal CBOR / record payload in-test and asserts

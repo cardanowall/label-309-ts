@@ -1,4 +1,4 @@
-// Public types for the CIP-309 standalone verifier.
+// Public types for the Label 309 standalone verifier.
 //
 // The verifier is service-independent: it depends only on the operator-supplied
 // Cardano / Arweave / IPFS gateway chains and a `denyHosts` policy. Every
@@ -200,7 +200,7 @@ export interface VerifyUriCheck {
 // These surfaces describe the Cardano transaction that carried the PoE: which
 // wallet vkey(s) authorised/paid for it, the fee, and the outputs. This is the
 // "who submitted and paid for this anchoring" view — orthogonal to
-// `record_signatures`, which is the optional CIP-309 record-level authorship
+// `record_signatures`, which is the optional Label 309 record-level authorship
 // claim. A failed `signature_valid` here is INFORMATIONAL: it never changes the
 // verifier's verdict (the content claim does not depend on who paid the fee).
 

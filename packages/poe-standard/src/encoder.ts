@@ -1,4 +1,4 @@
-// CIP-309 v1 record encoder.
+// Label 309 v1 record encoder.
 //
 // Produces canonical CBOR bytes per RFC 8949 §4.2.1 deterministic encoding —
 // definite-length, sorted bytewise lex map keys, no duplicates, preferred
@@ -43,7 +43,7 @@ export function encodePoeRecord(record: PoeRecord): Uint8Array {
 // `sigs[i]` signs over). The body is the full record map MINUS the `sigs`
 // field; producers prepend the 25-byte UTF-8 domain prefix
 // `cardano-poe-record-sig-v1` before invoking Ed25519 (the crypto-core
-// helper `buildCip309SigStructure` handles the prefix and `Sig_structure`
+// helper `buildLabel309SigStructure` handles the prefix and `Sig_structure`
 // wrapping).
 export function encodeRecordBodyForSigning(record: PoeRecord): Uint8Array {
   const body: CborMap = recordToCborInternal(record, /* includeSigs */ false);

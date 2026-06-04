@@ -14,7 +14,7 @@ name: release
 #      (@cardanowall/crypto-core, @cardanowall/poe-standard, @cardanowall/sdk-ts)
 #      with these EXACT fields:
 #         Organization or user : cardanowall
-#         Repository           : cip309-ts
+#         Repository           : label-309-ts
 #         Workflow filename    : release.yml
 #         Environment          : (leave blank)
 #      Then clear the NPM_TOKEN secret. With id-token: write below and the secret
@@ -152,7 +152,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          name: 'CIP-309 TypeScript SDKs ${{ github.ref_name }}'
+          name: 'Label 309 TypeScript SDKs ${{ github.ref_name }}'
           generate_release_notes: true
           draft: false
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}

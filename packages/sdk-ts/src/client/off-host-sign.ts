@@ -1,4 +1,4 @@
-// CIP-309 v1 off-host signing helper. The signing key never leaves the user
+// Label 309 v1 off-host signing helper. The signing key never leaves the user
 // device — this module touches only the public-data inputs (record bytes +
 // pubkey) and the public-data output (the 64-byte Ed25519 signature). The
 // integrator's signer callback owns the private key material.
@@ -48,7 +48,7 @@
 import { encodeCanonicalCbor, type CanonicalCborValue } from '@cardanowall/crypto-core/cbor';
 import {
   CARDANO_POE_SIG_DOMAIN_PREFIX_BYTES,
-  buildCip309SigStructure,
+  buildLabel309SigStructure,
   buildSigStructure,
   encodeCoseSign1,
   type CoseHeader,
@@ -141,7 +141,7 @@ export function prepareSigStructure(args: PrepareSigStructureArgs): PrepareSigSt
   }
   const { protectedHeaderBytes } = encodePath1ProtectedHeader(args.signerPubkey);
   const recordBodyCbor = encodeRecordBodyForSigning(args.record);
-  const sigStructureBytes = buildCip309SigStructure({
+  const sigStructureBytes = buildLabel309SigStructure({
     bodyProtectedBytes: protectedHeaderBytes,
     recordBodyCbor,
   });
@@ -150,7 +150,7 @@ export function prepareSigStructure(args: PrepareSigStructureArgs): PrepareSigSt
 
 // Assembles `COSE_Sign1 = [ protected_bytes, unprotected_map, null, signature ]`
 // (detached payload, `alg = -8`, protected `kid = signerPubkey`), chunks the
-// result into the CIP-309 chunked-bytes-array shape, and emits a path-1-only
+// result into the Label 309 chunked-bytes-array shape, and emits a path-1-only
 // `{cose_sign1}` `sigs[i]` entry.
 export function assembleCoseSign1(args: AssembleCoseSign1Args): AssembleCoseSign1Result {
   if (args.signerPubkey.length !== ED25519_PUBLIC_KEY_LENGTH) {

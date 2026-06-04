@@ -1,18 +1,18 @@
 {
   "name": "@cardanowall/crypto-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Closed-catalogue cryptographic primitives for CIP-309 Proof-of-Existence (TypeScript reference implementation; byte-identical Python parity twin).",
+  "description": "Closed-catalogue cryptographic primitives for Label 309 Proof-of-Existence (TypeScript reference implementation; byte-identical Python parity twin).",
   "license": "Apache-2.0",
   "author": "CardanoWall <hello@cardanowall.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cardanowall/cip309-ts.git",
+    "url": "git+https://github.com/cardanowall/label-309-ts.git",
     "directory": "packages/crypto-core"
   },
-  "homepage": "https://github.com/cardanowall/cip309-ts#readme",
+  "homepage": "https://github.com/cardanowall/label-309-ts#readme",
   "bugs": {
-    "url": "https://github.com/cardanowall/cip309-ts/issues"
+    "url": "https://github.com/cardanowall/label-309-ts/issues"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

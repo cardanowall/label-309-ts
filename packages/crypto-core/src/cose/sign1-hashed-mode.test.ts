@@ -1,6 +1,6 @@
 // Crypto-core verifier hashed-mode dedicated test.
 //
-// Covers `coseSign1Cip309Verify`'s branching on the unprotected
+// Covers `coseSign1Label309Verify`'s branching on the unprotected
 // `"hashed": true` flag in isolation (independent of the SDK-level helper).
 
 import fs from 'node:fs';
@@ -15,9 +15,9 @@ import { signEd25519 } from '../sig/ed25519';
 
 import {
   CARDANO_POE_SIG_DOMAIN_PREFIX_BYTES,
-  buildCip309SigStructure,
+  buildLabel309SigStructure,
   buildSigStructure,
-  coseSign1Cip309Verify,
+  coseSign1Label309Verify,
   encodeCoseSign1,
   type CoseHeader,
 } from './sign1';
@@ -80,7 +80,7 @@ function buildHashedModeCoseSign1(args: {
   return { coseBytes, sigStructureBytes };
 }
 
-describe('coseSign1Cip309Verify — hashed-mode (CIP-8)', () => {
+describe('coseSign1Label309Verify — hashed-mode (CIP-8)', () => {
   for (const vector of corpus.cardano_poe_vectors) {
     it(`accepts a valid hashed-mode COSE_Sign1 for ${vector.name}`, () => {
       const recordBodyCbor = hexToBytes(vector.record_body_cbor_hex);
@@ -89,7 +89,7 @@ describe('coseSign1Cip309Verify — hashed-mode (CIP-8)', () => {
         seed: hexToBytes(vector.signer_secret_key_hex),
         recordBodyCbor,
       });
-      const result = coseSign1Cip309Verify({
+      const result = coseSign1Label309Verify({
         message: coseBytes,
         detachedRecordBodyCbor: recordBodyCbor,
       });
@@ -116,7 +116,7 @@ describe('coseSign1Cip309Verify — hashed-mode (CIP-8)', () => {
         payload: null,
         signature,
       });
-      const result = coseSign1Cip309Verify({
+      const result = coseSign1Label309Verify({
         message: strippedCose,
         detachedRecordBodyCbor: recordBodyCbor,
       });
@@ -139,7 +139,7 @@ describe('coseSign1Cip309Verify — hashed-mode (CIP-8)', () => {
         payload: null,
         signature: bogusSignature,
       });
-      const result = coseSign1Cip309Verify({
+      const result = coseSign1Label309Verify({
         message: coseBytes,
         detachedRecordBodyCbor: recordBodyCbor,
       });
@@ -158,7 +158,7 @@ describe('coseSign1Cip309Verify — hashed-mode (CIP-8)', () => {
         [4, signerPubkey],
       ]);
       const protectedHeaderBytes = encodeCanonicalCbor(protectedHeader as CanonicalCborValue);
-      const sigStructureBytes = buildCip309SigStructure({
+      const sigStructureBytes = buildLabel309SigStructure({
         bodyProtectedBytes: protectedHeaderBytes,
         recordBodyCbor,
       });
@@ -169,7 +169,7 @@ describe('coseSign1Cip309Verify — hashed-mode (CIP-8)', () => {
         payload: null,
         signature,
       });
-      const result = coseSign1Cip309Verify({
+      const result = coseSign1Label309Verify({
         message: coseBytes,
         detachedRecordBodyCbor: recordBodyCbor,
       });

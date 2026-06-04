@@ -1,6 +1,6 @@
 export * from './off-host-sign';
 
-export { Cip309Client } from './cip309-client';
+export { Label309Client } from './label-309-client';
 export { AccountNamespace } from './account';
 export { PoeNamespace } from './poe';
 export { RecordsNamespace } from './records';
@@ -8,8 +8,8 @@ export { PublishError } from './publish';
 export { PartialUploadError } from './partial-upload-error';
 
 export {
-  Cip309HttpError,
-  type Cip309HttpErrorInit,
+  Label309HttpError,
+  type Label309HttpErrorInit,
   type ProblemDetails,
   type ProblemErrorEntry,
 } from './http-error';
@@ -37,7 +37,7 @@ export { parseHttpError } from './parse-http-error';
 
 export type {
   AccountBalance,
-  Cip309ClientConfig,
+  Label309ClientConfig,
   ConformanceProfile,
   FetchImpl,
   PoeItemResponse,

@@ -24,7 +24,7 @@
 // TTL window; the handler runs fresh and (assuming the balance now suffices)
 // the retry returns 202 with a freshly assigned `id`.
 
-import { Cip309HttpError, type Cip309HttpErrorInit } from './http-error';
+import { Label309HttpError, type Label309HttpErrorInit } from './http-error';
 
 function readBigIntString(value: unknown): bigint | undefined {
   if (typeof value !== 'string') return undefined;
@@ -40,12 +40,12 @@ function readString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-export class InsufficientFundsError extends Cip309HttpError {
+export class InsufficientFundsError extends Label309HttpError {
   public readonly balanceUsdMicros: bigint | undefined;
   public readonly requiredUsdMicros: bigint | undefined;
   public readonly topUpUrl: string | undefined;
 
-  constructor(init: Cip309HttpErrorInit) {
+  constructor(init: Label309HttpErrorInit) {
     super(init);
     this.name = 'InsufficientFundsError';
     this.balanceUsdMicros = readBigIntString(this.extensions['balance_usd_micros']);

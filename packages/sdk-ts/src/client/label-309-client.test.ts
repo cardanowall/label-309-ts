@@ -1,8 +1,8 @@
-// Unit tests for Cip309Client + namespace wiring.
+// Unit tests for Label309Client + namespace wiring.
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { Cip309Client } from './cip309-client';
+import { Label309Client } from './label-309-client';
 import { InvalidClientConfigError } from './invalid-client-config-error';
 import { PoeNamespace } from './poe';
 import { RecordsNamespace } from './records';
@@ -30,9 +30,9 @@ function authHeader(fetchMock: ReturnType<typeof vi.fn>): string | null {
   return (init.headers as Headers).get('authorization');
 }
 
-describe('Cip309Client', () => {
+describe('Label309Client', () => {
   it('wires up poe + records namespaces against an explicit base URL', () => {
-    const client = new Cip309Client({
+    const client = new Label309Client({
       baseUrl: 'https://gateway.example.com',
       fetch: vi.fn(),
     });
@@ -42,7 +42,7 @@ describe('Cip309Client', () => {
 
   it('uses the base URL verbatim and strips a trailing slash', () => {
     const fetchMock = recordsListFetchMock();
-    const client = new Cip309Client({ baseUrl: 'http://localhost:3000/', fetch: fetchMock });
+    const client = new Label309Client({ baseUrl: 'http://localhost:3000/', fetch: fetchMock });
     void client.records.list({ sealed: true });
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('http://localhost:3000/api/v1/records?sealed=true'),
@@ -71,7 +71,7 @@ describe('Cip309Client', () => {
       ),
     );
     const apiKey = 'opaque-bearer-token';
-    const client = new Cip309Client({
+    const client = new Label309Client({
       baseUrl: 'https://gateway.example.com',
       apiKey,
       fetch: fetchMock,
@@ -85,7 +85,7 @@ describe('Cip309Client', () => {
 
   it('uses globalThis.fetch when no fetch is provided', () => {
     // Should not throw — globalThis.fetch exists in Vitest environment.
-    expect(() => new Cip309Client({ baseUrl: 'https://gateway.example.com' })).not.toThrow();
+    expect(() => new Label309Client({ baseUrl: 'https://gateway.example.com' })).not.toThrow();
   });
 
   it('throws when no fetch impl is available', () => {
@@ -93,7 +93,7 @@ describe('Cip309Client', () => {
     // @ts-expect-error — deliberately blanking globalThis.fetch for the test
     globalThis.fetch = undefined;
     try {
-      expect(() => new Cip309Client({ baseUrl: 'https://gateway.example.com' })).toThrow(
+      expect(() => new Label309Client({ baseUrl: 'https://gateway.example.com' })).toThrow(
         /no fetch implementation/,
       );
     } finally {
@@ -102,10 +102,10 @@ describe('Cip309Client', () => {
   });
 });
 
-describe('Cip309Client — config resolution contract', () => {
+describe('Label309Client — config resolution contract', () => {
   it('accepts an arbitrary opaque bearer key against any base URL', () => {
     // A vendor key in some unknown format — the SDK never inspects it.
-    const client = new Cip309Client({
+    const client = new Label309Client({
       baseUrl: 'https://gateway.example.com',
       apiKey: 'whatever-format-the-vendor-likes',
       fetch: vi.fn(),
@@ -116,7 +116,7 @@ describe('Cip309Client — config resolution contract', () => {
   it('forwards the opaque key verbatim as a Bearer token', async () => {
     const fetchMock = recordsListFetchMock();
     const opaque = 'opaque-vendor-token-123';
-    const client = new Cip309Client({
+    const client = new Label309Client({
       baseUrl: 'https://gateway.example.com',
       apiKey: opaque,
       fetch: fetchMock,
@@ -127,7 +127,7 @@ describe('Cip309Client — config resolution contract', () => {
 
   it('targets the supplied base URL regardless of key shape', async () => {
     const fetchMock = recordsListFetchMock();
-    const client = new Cip309Client({
+    const client = new Label309Client({
       baseUrl: 'https://gw.test.example',
       apiKey: 'some-key',
       fetch: fetchMock,
@@ -141,7 +141,7 @@ describe('Cip309Client — config resolution contract', () => {
 
   it('stays anonymous (no Authorization header) when no key is given', async () => {
     const fetchMock = recordsListFetchMock();
-    const client = new Cip309Client({
+    const client = new Label309Client({
       baseUrl: 'https://gateway.example.com',
       fetch: fetchMock,
     });
@@ -152,12 +152,12 @@ describe('Cip309Client — config resolution contract', () => {
   it('throws InvalidClientConfigError when baseUrl is missing', () => {
     expect(
       // @ts-expect-error — baseUrl is required; exercising the runtime guard
-      () => new Cip309Client({ apiKey: 'some-key', fetch: vi.fn() }),
+      () => new Label309Client({ apiKey: 'some-key', fetch: vi.fn() }),
     ).toThrow(InvalidClientConfigError);
   });
 
   it('throws InvalidClientConfigError when baseUrl is empty/whitespace', () => {
-    expect(() => new Cip309Client({ baseUrl: '   ', fetch: vi.fn() })).toThrow(
+    expect(() => new Label309Client({ baseUrl: '   ', fetch: vi.fn() })).toThrow(
       InvalidClientConfigError,
     );
   });

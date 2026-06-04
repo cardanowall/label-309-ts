@@ -266,7 +266,7 @@ export function sliceLabel309Value(txCbor: Uint8Array): Uint8Array | null {
 
 /**
  * Cardano caps individual metadata `bstr` / `tstr` values at 64 bytes
- * (Cardano metadata spec). A CIP-309 PoE record's
+ * (Cardano metadata spec). A Label 309 PoE record's
  * canonical CBOR is typically several hundred bytes, so the producer emits
  * it as a `bytes-chunk-array` — `[ bstr .size (1..64), … ]` — at the
  * label-309 value position. The verifier MUST byte-concatenate the chunks

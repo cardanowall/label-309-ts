@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { encodeCanonicalCbor, type CanonicalCborValue } from '@cardanowall/crypto-core/cbor';
 import {
   buildSigStructure,
-  coseSign1Cip309Build,
+  coseSign1Label309Build,
   encodeCoseSign1,
   type CoseHeader,
 } from '@cardanowall/crypto-core/cose';
@@ -74,7 +74,7 @@ function buildPath1Record(opts: { seed?: Uint8Array; tamper?: boolean } = {}): B
     [1, -8],
     [4, pub],
   ]);
-  let cose = coseSign1Cip309Build({
+  let cose = coseSign1Label309Build({
     protectedHeader,
     unprotectedHeader: new Map(),
     recordBodyCbor: bodyCbor,
@@ -124,7 +124,7 @@ function buildPath2Record(
     [1, -8],
     ['address', address],
   ]);
-  const cose = coseSign1Cip309Build({
+  const cose = coseSign1Label309Build({
     protectedHeader,
     unprotectedHeader: new Map(),
     recordBodyCbor: bodyCbor,
@@ -168,7 +168,7 @@ describe('verifyRecordSignatures — path 1 (in-signature kid)', () => {
   });
 
   it('attached payload → MALFORMED_SIG_COSE_SIGN1', async () => {
-    // Build a COSE_Sign1 with an ATTACHED (non-null) payload. CIP-309 mandates
+    // Build a COSE_Sign1 with an ATTACHED (non-null) payload. Label 309 mandates
     // a detached payload, so the verifier must reject this as malformed.
     const seed = makeSeed(30);
     const pub = getPublicKeyEd25519({ seed });
@@ -192,7 +192,7 @@ describe('verifyRecordSignatures — path 1 (in-signature kid)', () => {
     const cose = encodeCoseSign1({
       protectedHeader,
       unprotectedHeader: new Map(),
-      payload: bodyCbor, // attached (non-null) → CIP-309-non-conformant
+      payload: bodyCbor, // attached (non-null) → Label 309-non-conformant
       signature,
     });
     const record = {

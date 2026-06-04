@@ -7,7 +7,7 @@
 
 import { getPublicKeyEd25519, hexToBytes, signEd25519 } from '@cardanowall/crypto-core';
 import {
-  buildCip309SigStructure,
+  buildLabel309SigStructure,
   encodeCoseSign1,
   type CoseHeader,
 } from '@cardanowall/crypto-core/cose';
@@ -70,7 +70,7 @@ function buildIdentitySigEntry(body: PoeRecord): SigEntry {
     [4, publicKey],
   ]);
   const protectedBytes = encodeCanonicalCbor(protectedHeader as CanonicalCborValue);
-  const sigStructure = buildCip309SigStructure({
+  const sigStructure = buildLabel309SigStructure({
     bodyProtectedBytes: protectedBytes,
     recordBodyCbor: encodeRecordBodyForSigning(body),
   });
@@ -109,7 +109,7 @@ function buildWalletSigEntry(body: PoeRecord): SigEntry {
     ['address', stakeAddr],
   ]);
   const protectedBytes = encodeCanonicalCbor(protectedHeader as CanonicalCborValue);
-  const sigStructure = buildCip309SigStructure({
+  const sigStructure = buildLabel309SigStructure({
     bodyProtectedBytes: protectedBytes,
     recordBodyCbor: encodeRecordBodyForSigning(body),
   });

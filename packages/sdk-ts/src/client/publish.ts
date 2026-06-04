@@ -8,7 +8,7 @@
 //
 //   2. `publishSealed({content, recipients, signer?})` — encrypt the content
 //      to the recipient X25519 public keys (age-style sealed envelope),
-//      upload the ciphertext to Arweave via /uploads, build a CIP-309 record
+//      upload the ciphertext to Arweave via /uploads, build a Label 309 record
 //      with the resulting `ar://` URI, sign, and post to /publish.
 //
 //   3. `publishMerkle({leaves, signer?})` — anchor an arbitrary number of leaf

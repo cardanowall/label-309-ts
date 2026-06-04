@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Conformance CLI: single-tx verification against the CIP-309 standalone
+// Conformance CLI: single-tx verification against the Label 309 standalone
 // verifier.
 //
 // Exit codes (extended with 4 for CLI input errors):
@@ -70,7 +70,7 @@ const USAGE = `Usage: cardanowall-sdk-conformance <tx-hash> [--gateway <url>] [-
        cardanowall-sdk-conformance --version
        cardanowall-sdk-conformance --help
 
-Runs the @cardanowall/sdk-ts standalone CIP-309 verifier against a single
+Runs the @cardanowall/sdk-ts standalone Label 309 verifier against a single
 Cardano transaction. Exit codes:
   0 = valid, 1 = failed (integrity), 2 = failed (network), 3 = pending,
   4 = CLI input error.`;

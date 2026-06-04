@@ -1,4 +1,4 @@
-// CIP-309 v1 error-code catalogue — single source of truth for the
+// Label 309 v1 error-code catalogue — single source of truth for the
 // structural-validator codes (Part A) and the verifier-layer codes (Part B)
 // that downstream verifiers re-export from this package.
 //

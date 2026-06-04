@@ -8,7 +8,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { Cip309Client } from './cip309-client';
+import { Label309Client } from './label-309-client';
 import { InsufficientScopeError } from './insufficient-scope-error';
 import { UnauthorizedError } from './unauthorized-error';
 
@@ -26,8 +26,8 @@ function problemResponse(body: Record<string, unknown>, status: number): Respons
   });
 }
 
-function makeClient(fetchMock: ReturnType<typeof vi.fn>): Cip309Client {
-  return new Cip309Client({
+function makeClient(fetchMock: ReturnType<typeof vi.fn>): Label309Client {
+  return new Label309Client({
     apiKey: `sk-cw-live-${'a'.repeat(52)}`,
     baseUrl: 'http://test.example',
     fetch: fetchMock as unknown as typeof globalThis.fetch,

@@ -22,11 +22,11 @@ export const BLOCKFROST_MAINNET_HOST = 'https://cardano-mainnet.blockfrost.io/ap
 // loop on a definitive "this tx is not on chain / has no PoE metadata"
 // response: a definitive negative from one gateway is authoritative, so there
 // is no point rotating to the next gateway.
-export class NotACip309RecordError extends Error {
+export class NotALabel309RecordError extends Error {
   readonly code = 'METADATA_NOT_FOUND' as const;
   constructor(message: string) {
     super(message);
-    this.name = 'NotACip309RecordError';
+    this.name = 'NotALabel309RecordError';
   }
 }
 
@@ -42,7 +42,7 @@ export async function resolveCardanoTx(args: {
     try {
       return await resolveViaKoios(input.txHash, koiosUrl, fetchFn);
     } catch (e) {
-      if (e instanceof NotACip309RecordError) throw e;
+      if (e instanceof NotALabel309RecordError) throw e;
       lastErr = e;
     }
   }
@@ -51,7 +51,7 @@ export async function resolveCardanoTx(args: {
     try {
       return await resolveViaBlockfrost(input.txHash, input.blockfrostProjectId, fetchFn);
     } catch (e) {
-      if (e instanceof NotACip309RecordError) throw e;
+      if (e instanceof NotALabel309RecordError) throw e;
       lastErr = e;
     }
   }
@@ -75,7 +75,7 @@ async function resolveViaKoios(
   }
   const cborJson = parseJson(cborRes.bytes);
   if (!Array.isArray(cborJson) || cborJson.length === 0) {
-    throw new NotACip309RecordError('koios returned empty array for tx_cbor; tx may not exist');
+    throw new NotALabel309RecordError('koios returned empty array for tx_cbor; tx may not exist');
   }
   const cborEntry = cborJson[0] as { tx_hash?: unknown; cbor?: unknown };
   if (typeof cborEntry.cbor !== 'string') {
@@ -100,7 +100,7 @@ async function resolveViaKoios(
   }
   const infoJson = parseJson(infoRes.bytes);
   if (!Array.isArray(infoJson) || infoJson.length === 0) {
-    throw new NotACip309RecordError('koios returned empty array for tx_info');
+    throw new NotALabel309RecordError('koios returned empty array for tx_info');
   }
   const infoEntry = infoJson[0] as {
     tx_hash?: unknown;

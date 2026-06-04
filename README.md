@@ -1,6 +1,6 @@
-# CIP-309 TypeScript SDKs
+# Label 309 TypeScript SDKs
 
-TypeScript reference implementation of [**CIP-309**](https://github.com/cardanowall/cip309) —
+TypeScript reference implementation of [**Label 309**](https://github.com/cardanowall/label-309) —
 an open standard for **Proof of Existence (PoE)** anchored on the Cardano
 blockchain. Hash content, publish the digest on-chain under metadata label 309,
 and let anyone prove "this content existed on or before block time T" without
@@ -12,7 +12,7 @@ another:
 | Package | What it is |
 | --- | --- |
 | [`@cardanowall/crypto-core`](packages/crypto-core) | Closed-catalogue cryptographic primitives: hash, KDF, signature, KEM, AEAD, CBOR, COSE, sealed-PoE, Merkle, diceware. |
-| [`@cardanowall/poe-standard`](packages/poe-standard) | The CIP-309 record schema, canonical-CBOR encoder, structural validator, and error-code catalogue — the wire-format library. |
+| [`@cardanowall/poe-standard`](packages/poe-standard) | The Label 309 record schema, canonical-CBOR encoder, structural validator, and error-code catalogue — the wire-format library. |
 | [`@cardanowall/sdk-ts`](packages/sdk-ts) | The high-level SDK: a standalone verifier (three roles), a gateway-agnostic HTTP client, off-host signing, and seed-derived identity helpers. Runs in the browser, Node.js, Deno, and Bun. |
 
 `sdk-ts` depends on `poe-standard`, which depends on `crypto-core`; the three
@@ -30,7 +30,7 @@ lower-level surface on its own.
 
 ## Quickstart
 
-Verify any CIP-309 transaction from chain metadata alone — no issuer server in
+Verify any Label 309 transaction from chain metadata alone — no issuer server in
 the trust path:
 
 ```ts
@@ -64,13 +64,13 @@ Rust SDKs, which is what keeps all three byte-identical.
 
 ## The standard and sibling implementations
 
-- [`cip309`](https://github.com/cardanowall/cip309) — the standard: prose spec,
+- [`label-309`](https://github.com/cardanowall/label-309) — the standard: prose spec,
   CDDL grammar, JSON schemas, registries, and the canonical conformance vectors.
-- [`cip309-py`](https://github.com/cardanowall/cip309-py) — the Python SDK
+- [`label-309-py`](https://github.com/cardanowall/label-309-py) — the Python SDK
   (byte-parity twin).
-- [`cip309-rs`](https://github.com/cardanowall/cip309-rs) — the Rust SDK
+- [`label-309-rs`](https://github.com/cardanowall/label-309-rs) — the Rust SDK
   (byte-parity twin).
-- [`cip309-cli`](https://github.com/cardanowall/cip309-cli) — the
+- [`label-309-cli`](https://github.com/cardanowall/label-309-cli) — the
   `cardanowall` command-line tool.
 
 ## License

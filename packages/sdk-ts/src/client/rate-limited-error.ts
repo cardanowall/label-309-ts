@@ -5,10 +5,10 @@
 // thrown error; the value is undefined if the header is absent or
 // non-numeric. Per RFC 7807, no retry hint appears in the problem body.
 
-import { Cip309HttpError, type Cip309HttpErrorInit } from './http-error';
+import { Label309HttpError, type Label309HttpErrorInit } from './http-error';
 
-export class RateLimitedError extends Cip309HttpError {
-  constructor(init: Cip309HttpErrorInit) {
+export class RateLimitedError extends Label309HttpError {
+  constructor(init: Label309HttpErrorInit) {
     super(init);
     this.name = 'RateLimitedError';
   }

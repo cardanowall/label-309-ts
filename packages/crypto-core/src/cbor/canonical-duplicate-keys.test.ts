@@ -10,7 +10,7 @@ import { CanonicalCborError } from './errors';
 // Map-canonicality: a canonical decoder MUST reject BOTH duplicate map keys
 // AND non-canonical (distinct-but-unsorted) key ordering (RFC 8949 §4.2.1).
 // cbor2 surfaces both with the same "Duplicate or out of order key" message,
-// and the CIP-309 taxonomy folds both into a single MALFORMED_CBOR code (there
+// and the Label 309 taxonomy folds both into a single MALFORMED_CBOR code (there
 // is no separate duplicate-key code). This suite locks in that both vector
 // families — including the previously-untested unsorted-distinct case — reject
 // as MALFORMED_CBOR.

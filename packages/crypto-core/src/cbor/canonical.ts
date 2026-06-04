@@ -29,7 +29,7 @@ export function decodeCanonicalCbor(bytes: Uint8Array): unknown {
       ...cdeDecodeOptions,
       rejectStreaming: true,
       rejectDuplicateKeys: true,
-      // A CIP-309 record carries integers, byte/text strings, arrays, maps and
+      // A Label 309 record carries integers, byte/text strings, arrays, maps and
       // `null` — and nothing else. Without these rejections the major-type-7
       // surface leaks into the decoder: a float16/32/64 that happens to hold an
       // integral value (e.g. 1.0) silently decodes to the integer 1 and passes
@@ -58,7 +58,7 @@ function mapDecodeError(cause: unknown): CanonicalCborError {
   // non-canonical (unsorted) key ordering, non-minimal integer encodings, and
   // invalid UTF-8 in text strings. cbor2 raises the SAME "Duplicate or out of
   // order key" message for both true duplicates AND distinct-but-unsorted keys,
-  // so the two are indistinguishable by message — and per the CIP-309 taxonomy
+  // so the two are indistinguishable by message — and per the Label 309 taxonomy
   // both belong under MALFORMED_CBOR anyway. The specific cause survives in the
   // human-readable message below; for indefinite-length we state it explicitly
   // so the diagnostic is not lost when the code is collapsed.

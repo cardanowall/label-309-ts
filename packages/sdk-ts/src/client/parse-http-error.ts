@@ -1,5 +1,5 @@
 // Decodes an RFC 7807 `application/problem+json` body into the most-specific
-// `Cip309HttpError` subclass.
+// `Label309HttpError` subclass.
 //
 // Dispatch order:
 //   1. By `code` (lowercase-kebab) — preferred. Each registered code maps to a
@@ -10,7 +10,7 @@
 //
 // The dispatcher is intentionally exhaustive over the codes the API emits;
 // codes the SDK doesn't recognise fall through to the parent
-// `Cip309HttpError` with the verbatim problem document.
+// `Label309HttpError` with the verbatim problem document.
 // Forward-compatibility: a server can introduce new codes without breaking
 // older SDKs — consumers either catch the parent class or dispatch on
 // `err.code` directly.
@@ -19,7 +19,7 @@ import { BatchEmptyError } from './batch-empty-error';
 import { BatchTooLargeError } from './batch-too-large-error';
 import { ForbiddenError } from './forbidden-error';
 import {
-  Cip309HttpError,
+  Label309HttpError,
   extractProblemExtensions,
   type ProblemDetails,
   type ProblemErrorEntry,
@@ -122,7 +122,7 @@ export interface ParseHttpErrorArgs {
   readonly retryAfterSeconds?: number | undefined;
 }
 
-export function parseHttpError(args: ParseHttpErrorArgs): Cip309HttpError {
+export function parseHttpError(args: ParseHttpErrorArgs): Label309HttpError {
   const problem = toProblemDetails(args.httpStatus, args.body, args.requestId);
   const extensions = extractProblemExtensions(problem);
   const init = {
@@ -175,6 +175,6 @@ export function parseHttpError(args: ParseHttpErrorArgs): Cip309HttpError {
     case 'fx-stale':
       return new ServiceUnavailableError(init);
     default:
-      return new Cip309HttpError(init);
+      return new Label309HttpError(init);
   }
 }

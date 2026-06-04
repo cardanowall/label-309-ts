@@ -1,7 +1,7 @@
 // Transaction-level decode against a real on-chain Conway-era PoE transaction.
 //
 // The fixture below is the verbatim CBOR of a confirmed Cardano transaction
-// carrying a CIP-309 record under metadata label 309. It exercises the
+// carrying a Label 309 record under metadata label 309. It exercises the
 // byte-faithful body/witness slicing in `cbor-walker`, the vkey-witness
 // signature verification, and the JSON-safe transaction summary.
 
@@ -78,7 +78,7 @@ describe('sliceTxComponents — byte-faithful tx body slice', () => {
     expect(auxMetadataLabels).toEqual([309]);
   });
 
-  it('leaves sliceLabel309Value byte-identical (a CIP-309 record map)', () => {
+  it('leaves sliceLabel309Value byte-identical (a Label 309 record map)', () => {
     const fromHelper = sliceLabel309Value(TX);
     const { label309 } = sliceTxComponents(TX);
     expect(fromHelper).not.toBeNull();
@@ -86,7 +86,7 @@ describe('sliceTxComponents — byte-faithful tx body slice', () => {
     // sliceTxComponents finds — the refactor cannot change its output.
     expect(label309).not.toBeNull();
     expect(Array.from(label309!)).toEqual(Array.from(fromHelper!));
-    // The reassembled value decodes as a CIP-309 record: { "v": 1, … }.
+    // The reassembled value decodes as a Label 309 record: { "v": 1, … }.
     const record = decodeCbor(label309!) as Record<string, unknown>;
     expect(record['v']).toBe(1);
     expect('items' in record).toBe(true);

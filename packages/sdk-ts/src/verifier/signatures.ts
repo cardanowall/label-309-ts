@@ -1,4 +1,4 @@
-// CIP-309 record-level signature verifier.
+// Label 309 record-level signature verifier.
 //
 // One verification per `record.sigs[i]`. v1 has NO per-item signature slot —
 // the only signature surface is the record-level array. Two on-wire signer-key
@@ -14,7 +14,7 @@
 //
 // The signed-payload construction (`Sig_structure[3] = "cardano-poe-record-sig-v1" ||
 // canonicalCbor(record_body)`, `Sig_structure[2] = h''`) is enforced by the
-// `coseSign1Cip309Verify` helper in `@cardanowall/crypto-core/cose` — this
+// `coseSign1Label309Verify` helper in `@cardanowall/crypto-core/cose` — this
 // verifier never sees the prefix directly.
 
 import {
@@ -24,7 +24,7 @@ import {
   type SigEntry,
 } from '@cardanowall/poe-standard';
 import {
-  coseSign1Cip309Verify,
+  coseSign1Label309Verify,
   decodeCoseSign1,
   parseCoseKeyEd25519,
   type CoseSign1Decoded,
@@ -89,8 +89,8 @@ async function verifyOneSig(
   }
   const { pub, signerType } = resolved;
 
-  // Strict Ed25519 verify via the CIP-309-pinned helper.
-  const verifyResult = coseSign1Cip309Verify({
+  // Strict Ed25519 verify via the Label 309-pinned helper.
+  const verifyResult = coseSign1Label309Verify({
     message: coseBytes,
     detachedRecordBodyCbor: recordBodyCbor,
     expectedSignerKey: pub,

@@ -11,7 +11,7 @@ import { getPublicKeyEd25519, signEd25519 } from '@cardanowall/crypto-core/sig';
 import { mlkem768x25519Keygen, x25519PublicKey } from '@cardanowall/crypto-core/kem';
 import { validatePoeRecord } from '@cardanowall/poe-standard';
 
-import { Cip309Client } from './cip309-client';
+import { Label309Client } from './label-309-client';
 import { PartialUploadError } from './partial-upload-error';
 import { PublishError } from './publish';
 import type { Signer } from './types';
@@ -23,8 +23,8 @@ function jsonResponse(body: unknown, status = 202): Response {
   });
 }
 
-function makeClient(fetchMock: ReturnType<typeof vi.fn>): Cip309Client {
-  return new Cip309Client({
+function makeClient(fetchMock: ReturnType<typeof vi.fn>): Label309Client {
+  return new Label309Client({
     baseUrl: 'https://cardanowall.com',
     apiKey: 'opaque-bearer-token',
     fetch: fetchMock as unknown as typeof globalThis.fetch,

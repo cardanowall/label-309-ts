@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { coseSign1Cip309Verify } from './sign1';
+import { coseSign1Label309Verify } from './sign1';
 
 interface CardanoPoeVerifyVector {
   name: string;
@@ -46,10 +46,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const fixturePath = path.resolve(here, '../../tests/fixtures/cose/sign1-verify.json');
 const corpus = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as VerifyCorpus;
 
-describe('cose-sign1 — CIP-309 verify vectors', () => {
+describe('cose-sign1 — Label 309 verify vectors', () => {
   for (const vector of corpus.cardano_poe_vectors) {
     it(`verifies ${vector.name}`, () => {
-      const result = coseSign1Cip309Verify({
+      const result = coseSign1Label309Verify({
         message: hexToBytes(vector.message_hex),
         detachedRecordBodyCbor: hexToBytes(vector.detached_record_body_cbor_hex),
         ...(vector.expected_signer_key_hex !== undefined

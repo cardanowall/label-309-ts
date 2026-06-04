@@ -1,4 +1,4 @@
-// CIP-309 standalone verifier entry point.
+// Label 309 standalone verifier entry point.
 //
 // Pipeline (steps run sequentially; the verdict is the worst outcome across them):
 //   1. Resolve Cardano gateway + raw tx CBOR + confirmation depth.
@@ -17,7 +17,7 @@ import { tryDecryptions } from './decrypt';
 import { defaultFetchOutbound, wrapFetchOutbound } from './fetch';
 import { verifyMerkleCommitments } from './merkle';
 import { DEFAULT_PROFILE, planProfileSkips } from './profile';
-import { extractLabel309Metadata, NotACip309RecordError, resolveCardanoTx } from './resolve';
+import { extractLabel309Metadata, NotALabel309RecordError, resolveCardanoTx } from './resolve';
 import { verifyRecordSignatures } from './signatures';
 import { sliceTxComponents } from './cbor-walker';
 import { decodeTxSummary, decodeTxWitnesses } from './tx-witnesses';
@@ -68,7 +68,7 @@ export async function verifyTx(input: VerifyTxInput): Promise<VerifyReport> {
   try {
     resolved = await resolveCardanoTx({ input, fetchFn });
   } catch (e) {
-    if (e instanceof NotACip309RecordError) {
+    if (e instanceof NotALabel309RecordError) {
       return base({
         verdict: 'failed',
         exit_code: 1,
@@ -141,7 +141,7 @@ export async function verifyTx(input: VerifyTxInput): Promise<VerifyReport> {
  * Use this when you trust an upstream indexer for the (metadataCbor,
  * blockTime, blockSlot, numConfirmations) tuple and want to skip the
  * /tx_cbor + /tx_info round-trip. The caller is responsible for the
- * confidence that the supplied bytes actually came from a CIP-309 label-309
+ * confidence that the supplied bytes actually came from the label-309
  * metadata field of a confirmed Cardano transaction.
  */
 export async function verifyResolved(input: {

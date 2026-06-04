@@ -1,6 +1,6 @@
 // Frozen cross-language canonical-CBOR record vector.
 //
-// A single maximal CIP-309 v1 record — items (two hashes + ar:// and ipfs://
+// A single maximal Label 309 v1 record — items (two hashes + ar:// and ipfs://
 // uris + a sealed x25519 enc envelope), merkle, supersedes, a detached
 // Ed25519 sigs[0].cose_sign1, crit, and extension keys (`x-note`, `x-meta`) —
 // is encoded by the REAL encoder and pinned to frozen bytes. The Python SDK

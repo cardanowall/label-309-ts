@@ -1,13 +1,13 @@
-# @cardanowall/sdk-ts — the TypeScript SDK for CIP-309 Proof-of-Existence
+# @cardanowall/sdk-ts — the TypeScript SDK for Label 309 Proof-of-Existence
 
-The browser + Node TypeScript SDK for [CIP-309](https://cips.cardano.org/) Proof-of-Existence on Cardano: a **standalone verifier** (three roles), a **gateway-agnostic HTTP client**, **off-host signing** helpers, and **seed-derived identity** helpers.
+The browser + Node TypeScript SDK for [Label 309](https://cips.cardano.org/) Proof-of-Existence on Cardano: a **standalone verifier** (three roles), a **gateway-agnostic HTTP client**, **off-host signing** helpers, and **seed-derived identity** helpers.
 
 ## What it is
 
-CIP-309 anchors a content hash on Cardano under metadata label 309 so that anyone can later prove "this content existed on or before block time T" — without trusting any server, domain, or issuer identity. This package is the high-level TypeScript surface over that standard:
+Label 309 anchors a content hash on Cardano under metadata label 309 so that anyone can later prove "this content existed on or before block time T" — without trusting any server, domain, or issuer identity. This package is the high-level TypeScript surface over that standard:
 
-- **Verify** any CIP-309 transaction from chain metadata alone — no issuer server in the trust path.
-- **Publish, read, and decrypt** records against **any** CIP-309 gateway (you supply the base URL and an opaque key).
+- **Verify** any Label 309 transaction from chain metadata alone — no issuer server in the trust path.
+- **Publish, read, and decrypt** records against **any** Label 309 gateway (you supply the base URL and an opaque key).
 - **Sign** records off-host (AWS KMS, GCP HSM, YubiHSM, air-gapped) — the private key never touches the SDK.
 - **Derive identity** keypairs, recipient strings, signers, and sealed-PoE decryption from a single 32-byte seed.
 
@@ -44,7 +44,7 @@ const report = await verifyTx({
 
 console.log(report.verdict); // 'valid' | 'pending' | 'failed'
 console.log(report.exit_code); // 0 valid · 1 integrity fail · 2 network fail · 3 pending
-console.log(report.record); // the decoded CIP-309 PoeRecord
+console.log(report.record); // the decoded Label 309 PoeRecord
 ```
 
 To decrypt a sealed PoE addressed to you, run at the **recipient-sealed** profile and supply your X25519 private key per item index:
@@ -68,11 +68,11 @@ When you already hold the metadata bytes from an indexer mirror, skip the chain 
 `baseUrl` is **required** — the client binds to no particular deployment. `apiKey`, when present, is an **opaque** bearer token forwarded verbatim as `Authorization: Bearer <apiKey>`; the SDK never parses or assumes its format. Omit it for anonymous read-only use.
 
 ```ts
-import { Cip309Client } from '@cardanowall/sdk-ts';
+import { Label309Client } from '@cardanowall/sdk-ts';
 
-const client = new Cip309Client({
-  baseUrl: 'https://gateway.example.com', // any CIP-309 gateway
-  apiKey: process.env.CIP309_API_KEY, // opaque; omit for anonymous reads
+const client = new Label309Client({
+  baseUrl: 'https://gateway.example.com', // any Label 309 gateway
+  apiKey: process.env.LABEL309_API_KEY, // opaque; omit for anonymous reads
 });
 
 // Read surface — no auth required for public records.
@@ -158,11 +158,11 @@ Everything is reachable from the package root; submodule entry points (`/verifie
 
 **Client** (`/client`)
 
-- `Cip309Client({ baseUrl, apiKey?, fetch? })` — `baseUrl` required, key opaque.
+- `Label309Client({ baseUrl, apiKey?, fetch? })` — `baseUrl` required, key opaque.
 - `client.poe.{quote, publishContent, publishPrehashed, publishSealed, publishMerkle, uploads, publish, publishBatch}`.
 - `client.records.{get, verify}`, `client.inbox.{list, get}`, `client.account.balance()`.
 - Off-host signing: `prepareSigStructure`, `assembleCoseSign1`, plus the CIP-8 hashed-mode pair `prepareSigStructureHashed` / `assembleCoseSign1Hashed`.
-- Typed errors extending `Cip309HttpError`: `InsufficientFundsError`, `QuoteExpiredError`, `QuoteAlreadyConsumedError`, `FxStaleError`, `RateLimitedError`, `UnauthorizedError`, `ValidationFailedError`, `MalformedCborError`, `InvalidClientConfigError`, and more.
+- Typed errors extending `Label309HttpError`: `InsufficientFundsError`, `QuoteExpiredError`, `QuoteAlreadyConsumedError`, `FxStaleError`, `RateLimitedError`, `UnauthorizedError`, `ValidationFailedError`, `MalformedCborError`, `InvalidClientConfigError`, and more.
 
 **Identity** (`/identity`)
 
@@ -197,12 +197,12 @@ The verifier, the structural validator, the sealed-PoE construction, the off-hos
 
 ## Standard & service independence
 
-A CIP-309 proof verifies from three inputs only: the **transaction metadata**, optionally the **content bytes**, and a **public blockchain explorer**. No issuer server sits in the trust path. `verifyTx` reaches only the gateway chains you pass it, routes every outbound request through a single auditable egress point (every call lands in `VerifyReport.http_calls`), and enforces a deny-host policy — so the standalone verifier can be pointed at any infrastructure and still produce a trustworthy verdict.
+A Label 309 proof verifies from three inputs only: the **transaction metadata**, optionally the **content bytes**, and a **public blockchain explorer**. No issuer server sits in the trust path. `verifyTx` reaches only the gateway chains you pass it, routes every outbound request through a single auditable egress point (every call lands in `VerifyReport.http_calls`), and enforces a deny-host policy — so the standalone verifier can be pointed at any infrastructure and still produce a trustworthy verdict.
 
 ## Relation to the other packages
 
 - **`@cardanowall/crypto-core`** — closed-catalogue cryptographic primitives (hash, KDF, signature, KEM, AEAD, CBOR, COSE, sealed-PoE, Merkle, recipient encoding, seed derivation). The building blocks this SDK is built on.
-- **`@cardanowall/poe-standard`** — the CIP-309 wire-format library: record schema, canonical-CBOR encoder, pure structural validator, error-code catalogue.
+- **`@cardanowall/poe-standard`** — the Label 309 wire-format library: record schema, canonical-CBOR encoder, pure structural validator, error-code catalogue.
 - **`@cardanowall/sdk-py`** — the Python SDK: a byte-identical parity twin of this package, validated against the same canonical-CBOR vectors.
 - **`cardanowall`** (Rust crate) — the Rust SDK: the byte-parity twin in Rust, blocking HTTP, secure-by-default egress. The `cardanowall` CLI is built on it.
 

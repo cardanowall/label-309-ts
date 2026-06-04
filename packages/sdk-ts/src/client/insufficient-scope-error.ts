@@ -8,18 +8,18 @@
 // convenience for the common single-scope case (the server emits a one-element
 // `required` array today).
 
-import { Cip309HttpError, type Cip309HttpErrorInit } from './http-error';
+import { Label309HttpError, type Label309HttpErrorInit } from './http-error';
 
 function readScopeArray(value: unknown): ReadonlyArray<string> {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === 'string');
 }
 
-export class InsufficientScopeError extends Cip309HttpError {
+export class InsufficientScopeError extends Label309HttpError {
   public readonly requiredScopes: ReadonlyArray<string>;
   public readonly grantedScopes: ReadonlyArray<string>;
 
-  constructor(init: Cip309HttpErrorInit) {
+  constructor(init: Label309HttpErrorInit) {
     super(init);
     this.name = 'InsufficientScopeError';
     this.requiredScopes = readScopeArray(this.extensions['required']);

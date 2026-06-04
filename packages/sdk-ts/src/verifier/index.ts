@@ -1,4 +1,4 @@
-// Public surface of the CIP-309 standalone verifier. Named exports only.
+// Public surface of the Label 309 standalone verifier. Named exports only.
 
 export * from './types';
 export {
@@ -14,7 +14,7 @@ export { DEFAULT_PROFILE, profileImplements, planProfileSkips } from './profile'
 export {
   BLOCKFROST_MAINNET_HOST,
   KOIOS_MAINNET_URL,
-  NotACip309RecordError,
+  NotALabel309RecordError,
   extractLabel309Metadata,
   resolveCardanoTx,
 } from './resolve';

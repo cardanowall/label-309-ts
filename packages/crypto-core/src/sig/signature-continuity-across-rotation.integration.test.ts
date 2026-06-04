@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { coseSign1Cip309Build, coseSign1Cip309Verify } from '../cose/sign1';
+import { coseSign1Label309Build, coseSign1Label309Verify } from '../cose/sign1';
 import { deriveEd25519KeypairFromSeed } from '../seed-derive/derive';
 
 const s0 = new Uint8Array(32).fill(0xe0);
@@ -30,7 +30,7 @@ describe('signature continuity across N=2 rotations', () => {
     const ed25519Pub0 = new Uint8Array(ed0.publicKey);
     const ed25519Priv0 = new Uint8Array(ed0.secretKey);
 
-    // Build a CIP-309 record-signature COSE_Sign1 (detached null payload).
+    // Build a Label 309 record-signature COSE_Sign1 (detached null payload).
     // Protected header carries `kid = ed25519Pub0` at label 4 so the verifier
     // resolves the signer key from the message itself — the "path-1
     // in-signature kid" case.
@@ -38,7 +38,7 @@ describe('signature continuity across N=2 rotations', () => {
       [COSE_ALG_LABEL, COSE_ALG_EDDSA],
       [COSE_KID_LABEL, ed25519Pub0],
     ]);
-    const coseBytes = coseSign1Cip309Build({
+    const coseBytes = coseSign1Label309Build({
       protectedHeader,
       unprotectedHeader: new Map(),
       recordBodyCbor: RECORD_BODY_CBOR,
@@ -58,7 +58,7 @@ describe('signature continuity across N=2 rotations', () => {
     // Verify the original signature against the in-protected-header kid.
     // The verifier MUST NOT need the user's current Ed25519 keypair to
     // confirm the old attestation.
-    const verifyResult = coseSign1Cip309Verify({
+    const verifyResult = coseSign1Label309Verify({
       message: coseBytes,
       detachedRecordBodyCbor: RECORD_BODY_CBOR,
     });

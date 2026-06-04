@@ -1,7 +1,7 @@
-// CIP-309 v1 chunked-bytes and chunked-text helpers.
+// Label 309 v1 chunked-bytes and chunked-text helpers.
 //
 // The Cardano ledger CDDL constrains every `transaction_metadatum` byte string
-// (`bstr`) and text string (`tstr`) to ≤ 64 bytes. CIP-309 therefore carries
+// (`bstr`) and text string (`tstr`) to ≤ 64 bytes. Label 309 therefore carries
 // any logical value larger than 64 bytes as an ARRAY of ≤ 64-byte chunks. Two
 // chunked shapes exist:
 //
