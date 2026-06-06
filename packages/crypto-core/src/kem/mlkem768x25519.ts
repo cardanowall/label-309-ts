@@ -1,6 +1,6 @@
 import { XWing } from '@noble/post-quantum/hybrid.js';
 
-// X-Wing (ML-KEM-768 + X25519) hybrid KEM per draft-connolly-cfrg-xwing-kem-06.
+// X-Wing (ML-KEM-768 + X25519) hybrid KEM per draft-connolly-cfrg-xwing-kem-10.
 // `XWing` is @noble/post-quantum's alias for `ml_kem768_x25519`. We expose it
 // through opts-object wrappers that pin the wire lengths and map noble's field
 // names onto the project's vocabulary.
@@ -21,8 +21,10 @@ export const MLKEM768X25519_SEED_LENGTH = 32 as const;
 export const MLKEM768X25519_ESEED_LENGTH = 64 as const;
 
 export interface Mlkem768X25519KeyPair {
-  // The 32-byte root seed IS the secret key in draft-06: the ML-KEM coins and
-  // the X25519 scalar are re-expanded from it via SHAKE-256 at decapsulation.
+  // The 32-byte root seed IS the secret key: the ML-KEM coins and the X25519
+  // scalar are re-expanded from it via SHAKE-256 at decapsulation. (Later X-Wing
+  // drafts also define an optional expanded decapsulation-key form; we keep the
+  // seed-only key, which the draft-10 Appendix C vectors still pin.)
   readonly secretSeed: Uint8Array;
   readonly publicKey: Uint8Array;
 }

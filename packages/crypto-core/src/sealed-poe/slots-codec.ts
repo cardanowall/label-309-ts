@@ -3,14 +3,14 @@
 //
 //   1. How the 1120-byte X-Wing `enc` is split into the ≤ 64-byte byte-string
 //      chunks the Cardano ledger requires (`kem_ct`), and the inverse join.
-//   2. The canonical-CBOR serialization of the slot array that feeds slots_mac.
+//   2. The canonical slot-array structure the slots transcript commits to.
 //
 // Keeping both here means the producer (wrap) and the verifier (unwrap), as well
-// as the downstream record encoder, cannot diverge on the bytes the MAC commits
-// to — the single highest correctness risk for the hybrid branch, since a
-// divergence would leave the ML-KEM ciphertext unauthenticated.
+// as the downstream record encoder, cannot diverge on the bytes the slot-set MAC
+// commits to — the single highest correctness risk for the hybrid branch, since
+// a divergence would leave the ML-KEM ciphertext unauthenticated.
 
-import { encodeCanonicalCbor, type CanonicalCborValue } from '../cbor/canonical';
+import type { CanonicalCborValue } from '../cbor/canonical';
 
 import type { Mlkem768X25519Slot, X25519Slot } from './wrap';
 
@@ -51,36 +51,32 @@ export function joinKemCt(chunks: ReadonlyArray<Uint8Array>): Uint8Array {
   return out;
 }
 
-// KEM-driven slot serialization for the slots_mac input.
+// KEM-driven canonical slot-array structure committed by the slots transcript.
 //
 //   • x25519:         each slot → { epk: bstr, wrap: bstr }
 //   • mlkem768x25519: each slot → { kem_ct: [ bstr, ... ], wrap: bstr }
 //
-// The hybrid form uses the SAME chunked-array shape as the wire encoder, so the
-// MAC commits to the ciphertext exactly as it appears on-chain. Returns the
-// canonical-CBOR bytes ready for HMAC.
-export function slotsToMacCbor(
+// The hybrid form re-chunks `kem_ct` into its canonical ≤ 64-byte sequence so
+// the transcript commits to the ciphertext BYTES, not the wire chunk boundaries.
+// The on-wire `kem_ct` array is a transport detail (the Cardano ledger's 64-byte
+// metadatum cap), and a hostile or non-canonical chunking ([1, 63, …] instead of
+// [64, …]) reassembles to the SAME bytes — so the commitment must be invariant to
+// it. Committing to the verbatim wire chunks would let an attacker re-chunk an
+// honest envelope and break the slots_mac match for an honest recipient. Honest
+// (already-64B-chunked) records are unchanged; a real byte flip still changes the
+// reassembled bytes and is still rejected.
+//
+// Returns the slot-array structure (NOT encoded) so the caller can embed it in
+// the larger slots-transcript map before a single canonical encode.
+export function canonicalizeSlots(
   slots: ReadonlyArray<X25519Slot | Mlkem768X25519Slot>,
   kem: SealedKem,
-): Uint8Array {
-  let value: CanonicalCborValue;
+): CanonicalCborValue {
   if (kem === 'x25519') {
-    value = (slots as ReadonlyArray<X25519Slot>).map((s) => ({ epk: s.epk, wrap: s.wrap }));
-  } else {
-    value = (slots as ReadonlyArray<Mlkem768X25519Slot>).map((s) => ({
-      // Canonicalize the chunk boundaries before the MAC commits to them:
-      // reassemble the logical ciphertext and re-split into canonical ≤ 64-byte
-      // chunks. The on-wire `kem_ct` array is a transport detail (the Cardano
-      // ledger's 64-byte metadatum cap), and a hostile or non-canonical chunking
-      // ([1, 63, …] instead of [64, …]) reassembles to the SAME bytes — so the
-      // MAC must be invariant to it. Committing to the verbatim wire chunks would
-      // let an attacker re-chunk an honest envelope and break the slots_mac match
-      // for an honest recipient. Honest (already-64B-chunked) records are
-      // unchanged; a real byte flip still changes the reassembled bytes and is
-      // still rejected.
-      kem_ct: chunkKemCt(joinKemCt(s.kem_ct)),
-      wrap: s.wrap,
-    }));
+    return (slots as ReadonlyArray<X25519Slot>).map((s) => ({ epk: s.epk, wrap: s.wrap }));
   }
-  return encodeCanonicalCbor(value);
+  return (slots as ReadonlyArray<Mlkem768X25519Slot>).map((s) => ({
+    kem_ct: chunkKemCt(joinKemCt(s.kem_ct)),
+    wrap: s.wrap,
+  }));
 }

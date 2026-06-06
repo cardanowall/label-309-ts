@@ -6,9 +6,11 @@
 // concern (the Part B verifier role) and live in `@cardanowall/sdk-ts`.
 //
 // Pipeline:
-//   Step 1  Resource boundary       — n/a here (validator has no fixed cap;
-//                                     transactions are bounded by maxTxSize
-//                                     enforced at submission)
+//   Step 1  Resource boundary       — the enc-envelope slot-count and decoded-
+//                                     size caps (MAX_SLOTS / decoded-envelope
+//                                     bound, shared with the unwrap layer) are
+//                                     enforced inline in the domain pass before
+//                                     any per-slot work.
 //   Step 2  Canonical CBOR decode   — `decodeCanonicalCbor` from crypto-core
 //                                     surfaces malformed / non-canonical /
 //                                     duplicate-key inputs as typed errors.
@@ -32,6 +34,12 @@ import { z } from 'zod';
 
 import { decodeCanonicalCbor } from '@cardanowall/crypto-core/cbor';
 import { CoseVerifyError, decodeCoseSign1 } from '@cardanowall/crypto-core/cose';
+// The verifier resource bounds the sealed-PoE unwrap layer enforces. Importing
+// the same constants here, rather than re-declaring them, makes the structural
+// validator and the unwrap layer trip the identical thresholds: a divergence is
+// impossible because there is one definition. Both are deployment-pinned
+// reference values, not wire fields.
+import { MAX_DECODED_ENVELOPE_BYTES, MAX_SLOTS } from '@cardanowall/crypto-core/sealed-poe';
 
 import { bytesChunkArrayConcat, reconstructChunkedUri } from './chunked';
 import { SEVERITY, type ErrorCode, type Severity } from './error-codes';
@@ -120,6 +128,13 @@ const KEM_FIELD_LENGTH_CODE: Readonly<Record<KemSlotField, ErrorCode>> = {
   epk: 'KEM_EPK_LENGTH_MISMATCH',
   kem_ct: 'KEM_CT_LENGTH_MISMATCH',
 };
+
+// Fixed envelope-field lengths used by the decoded-envelope byte backstop. The
+// nonce is the XChaCha20-Poly1305 nonce (also the AEAD registry value) and
+// `slots_mac` is a SHA-256 MAC; both are pinned by the construction, so the
+// backstop measures the same aggregate the unwrap layer does.
+const NONCE_LENGTH = 24;
+const SLOTS_MAC_LENGTH = 32;
 
 // Passphrase KDF registry.
 const PASSPHRASE_KDF_ALGS: ReadonlySet<string> = new Set(['argon2id']);
@@ -610,29 +625,88 @@ function checkItemEnc(item: ItemEntry, idx: number, errors: ValidationIssue[]): 
   // contamination — an x25519 slot carrying a stray `kem_ct`, or a hybrid slot
   // carrying a stray `epk`, surfaces as `ENC_SLOT_INVALID_SHAPE`.
   if (hasSlots) {
-    if (enc.slots!.length < 1) {
+    const slotCount = enc.slots!.length;
+    if (slotCount < 1) {
       errors.push(
-        issue('ENC_SLOTS_EMPTY', [...basePath, 'slots'], `slots length ${enc.slots!.length} < 1`),
+        issue('ENC_SLOTS_EMPTY', [...basePath, 'slots'], `slots length ${slotCount} < 1`),
       );
-    }
-    // Only validate slot shape when the KEM is known; an unknown / absent KEM
-    // already emits its own code above, and we cannot pick a descriptor.
-    const descriptor = enc.kem !== undefined ? KEM_SLOT_DESCRIPTORS[enc.kem] : undefined;
-    if (descriptor !== undefined) {
-      // The permissive `SlotSchema` strips unknown keys before they reach the
-      // parsed slot, so the closed-map invariant ("a slot is exactly {<ct
-      // field>, wrap}") is enforced against the RAW decoded slot key set here.
-      const rawSlotKeys = rawSlotKeySets(item.enc);
-      enc.slots!.forEach((slot, si) => {
-        checkSlotShape(
-          slot,
-          rawSlotKeys[si] ?? new Set<string>(),
-          descriptor,
-          enc.kem!,
-          [...basePath, 'slots', si],
-          errors,
-        );
-      });
+    } else if (slotCount > MAX_SLOTS) {
+      // Slot-count resource bound — reject an over-large slot array before
+      // walking every slot, so a malformed record cannot drive unbounded
+      // per-slot work. This is the slot-count half of the partitioning-oracle
+      // resource guard; the unwrap layer trips the identical threshold first,
+      // so the two layers agree. Skip the per-slot, duplicate, and byte-size
+      // passes — the array is rejected outright.
+      errors.push(
+        issue(
+          'ENC_SLOTS_TOO_MANY',
+          [...basePath, 'slots'],
+          `slots length ${slotCount} exceeds MAX_SLOTS=${MAX_SLOTS}`,
+        ),
+      );
+    } else {
+      // Only validate slot shape when the KEM is known; an unknown / absent KEM
+      // already emits its own code above, and we cannot pick a descriptor.
+      const descriptor = enc.kem !== undefined ? KEM_SLOT_DESCRIPTORS[enc.kem] : undefined;
+      if (descriptor !== undefined) {
+        // The permissive `SlotSchema` strips unknown keys before they reach the
+        // parsed slot, so the closed-map invariant ("a slot is exactly {<ct
+        // field>, wrap}") is enforced against the RAW decoded slot key set here.
+        const rawSlotKeys = rawSlotKeySets(item.enc);
+        // Per-slot KEK uniqueness: the zero-nonce per-slot wrap is safe only
+        // because each slot draws fresh KEM randomness, so two slots sharing
+        // the same encapsulation material derive the same KEK and repeat a
+        // (KEK, zero-nonce) pair. The material that fixes the KEK is the `epk`
+        // (x25519) or the reassembled `kem_ct` (hybrid); a repeat of either
+        // across slots is rejected here, before any KEM/AEAD primitive — the
+        // same check the unwrap layer runs.
+        const seenKemMaterial = new Set<string>();
+        enc.slots!.forEach((slot, si) => {
+          const slotPath = [...basePath, 'slots', si] as const;
+          checkSlotShape(
+            slot,
+            rawSlotKeys[si] ?? new Set<string>(),
+            descriptor,
+            enc.kem!,
+            slotPath,
+            errors,
+          );
+          const material = slotKemMaterial(slot, descriptor);
+          if (material !== undefined) {
+            const key = bytesToHex(material);
+            if (seenKemMaterial.has(key)) {
+              errors.push(
+                issue(
+                  'ENC_SLOTS_DUPLICATE_KEM_MATERIAL',
+                  [...slotPath, descriptor.field],
+                  `slot ${si} ${descriptor.field} duplicates an earlier slot — per-slot KEK uniqueness is violated`,
+                ),
+              );
+            } else {
+              seenKemMaterial.add(key);
+            }
+          }
+        });
+
+        // Decoded-envelope byte backstop. Every per-slot field is fixed-length
+        // (the descriptor pins them; a wrong length already emitted its own
+        // code), so the decoded envelope's aggregate size is determined by the
+        // slot count: nonce + slots_mac + slotCount * (ct-field + wrap). This is
+        // the identical measure the unwrap layer computes, so the two layers
+        // trip `ENC_ENVELOPE_TOO_LARGE` on the same envelopes. A tighter cap
+        // than `MAX_SLOTS` for honest records.
+        const perSlotBytes = descriptor.fieldLength + descriptor.wrapLength;
+        const decodedEnvelopeBytes = NONCE_LENGTH + SLOTS_MAC_LENGTH + slotCount * perSlotBytes;
+        if (decodedEnvelopeBytes > MAX_DECODED_ENVELOPE_BYTES) {
+          errors.push(
+            issue(
+              'ENC_ENVELOPE_TOO_LARGE',
+              [...basePath, 'slots'],
+              `decoded envelope size ${decodedEnvelopeBytes} exceeds MAX_DECODED_ENVELOPE_BYTES=${MAX_DECODED_ENVELOPE_BYTES}`,
+            ),
+          );
+        }
+      }
     }
   }
 
@@ -827,6 +901,30 @@ function checkSlotShape(
       ),
     );
   }
+}
+
+// The encapsulation material that fixes a slot's per-slot KEK, used for the
+// within-record duplicate check: the `epk` (x25519) or the reassembled
+// `kem_ct` (hybrid). Returns `undefined` when the required field is absent —
+// the missing-field defect already emitted `ENC_SLOT_INVALID_SHAPE`, so the
+// duplicate pass simply skips that slot. Note: a duplicate of an unusual but
+// equal length still surfaces; the length-mismatch code (if any) co-fires.
+function slotKemMaterial(slot: Slot, descriptor: KemSlotDescriptor): Uint8Array | undefined {
+  if (descriptor.field === 'epk') {
+    return slot.epk;
+  }
+  if (slot.kem_ct === undefined) return undefined;
+  return bytesChunkArrayConcat(slot.kem_ct);
+}
+
+// Lowercase-hex of a byte string, for use as a Set key (Uint8Array identity is
+// reference-based, so equal-valued buffers must be compared by content).
+function bytesToHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i]!.toString(16).padStart(2, '0');
+  }
+  return hex;
 }
 
 // Extract the per-slot RAW key sets from a decoded `enc` value, BEFORE the

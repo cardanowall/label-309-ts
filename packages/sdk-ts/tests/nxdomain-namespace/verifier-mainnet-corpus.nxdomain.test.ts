@@ -1,4 +1,4 @@
-// Layer 1 + Layer 2 NXDOMAIN proof against the bootstrap corpus.
+// Layer 1 + Layer 2 NXDOMAIN proof against the synthetic mainnet corpus.
 //
 // Layer 1 (always on): the verifier resolves every corpus record to its
 // expected verdict whether the conformance deny-list is active OR bypassed,

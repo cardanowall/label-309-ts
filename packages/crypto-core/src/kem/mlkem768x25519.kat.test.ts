@@ -11,8 +11,9 @@ import {
   mlkem768x25519Keygen,
 } from './mlkem768x25519';
 
-// Known-answer vectors from RustCrypto/KEMs x-wing, pinned at commit
-// 2425fe5a3380fcc125f01ae7662e467c8857148d (draft-connolly-cfrg-xwing-kem-06).
+// Known-answer vectors from draft-connolly-cfrg-xwing-kem-10 Appendix C,
+// byte-identical to the RustCrypto/KEMs x-wing draft-06 vector set (commit
+// 2425fe5a3380fcc125f01ae7662e467c8857148d) the bytes were transcribed from.
 // These pin the wire format the wrapper depends on: 32-byte seed-only secret
 // key, 96-byte SHAKE-256 seed expansion, ML-KEM-first public-key layout, and
 // the SHA3-256 combiner output.
@@ -44,6 +45,15 @@ interface ShakeExpandVector {
   seed_hex: string;
   expected_expanded_hex: string;
   split_note: string;
+}
+
+interface DeterministicEncapsVector {
+  name: string;
+  seed_hex: string;
+  expected_pk_hex: string;
+  eseed_hex: string;
+  expected_enc_hex: string;
+  expected_ss_hex: string;
 }
 
 interface KatCorpus<V> {
@@ -79,15 +89,18 @@ const keygenCorpus = loadCorpus<KeygenVector>('mlkem768x25519-keygen-kat.json');
 const encapsCorpus = loadCorpus<EncapsVector>('mlkem768x25519-encaps-kat.json');
 const decapsCorpus = loadCorpus<DecapsVector>('mlkem768x25519-decaps-kat.json');
 const shakeExpandCorpus = loadCorpus<ShakeExpandVector>('mlkem768x25519-shake-expand-kat.json');
+const deterministicCorpus = loadCorpus<DeterministicEncapsVector>(
+  'mlkem768x25519-encaps-deterministic-draft10-kat.json',
+);
 
-describe('mlkem768x25519 — keygen KAT (RustCrypto x-wing draft-06)', () => {
+describe('mlkem768x25519 — keygen KAT (X-Wing draft-10 Appendix C)', () => {
   for (const vector of keygenCorpus.vectors) {
     it(`derives the pinned public key + seed-only secret for ${vector.name}`, () => {
       const seed = hexToBytes(vector.seed_hex);
       const { publicKey, secretSeed } = mlkem768x25519Keygen(seed);
 
       expect(bytesToHex(publicKey)).toBe(vector.expected_pk_hex);
-      // draft-06: the secret key is the 32-byte root seed itself.
+      // The secret key is the 32-byte root seed itself.
       expect(bytesToHex(secretSeed)).toBe(vector.expected_sk_seed_hex);
     });
   }
@@ -100,6 +113,26 @@ describe('mlkem768x25519 — encapsulate KAT (deterministic eseed)', () => {
       const eseed = hexToBytes(vector.eseed_hex);
       const { enc, ss } = mlkem768x25519Encapsulate({ publicKey, eseed });
 
+      expect(bytesToHex(enc)).toBe(vector.expected_enc_hex);
+      expect(bytesToHex(ss)).toBe(vector.expected_ss_hex);
+    });
+  }
+});
+
+describe('mlkem768x25519 — deterministic keygen+encapsulate KAT (X-Wing draft-10 Appendix C)', () => {
+  // The full deterministic chain pinned by draft-10 Appendix C: the seed derives
+  // the public key (keygen), and the eseed then derives the ciphertext + shared
+  // secret (encaps). This binds keygen and encaps together against an externally
+  // pinned anchor — the inline encaps KAT above starts from a hardcoded pk and
+  // never re-derives it from the seed.
+  for (const vector of deterministicCorpus.vectors) {
+    it(`derives pk from seed then ct+ss from eseed for ${vector.name}`, () => {
+      const seed = hexToBytes(vector.seed_hex);
+      const { publicKey } = mlkem768x25519Keygen(seed);
+      expect(bytesToHex(publicKey)).toBe(vector.expected_pk_hex);
+
+      const eseed = hexToBytes(vector.eseed_hex);
+      const { enc, ss } = mlkem768x25519Encapsulate({ publicKey, eseed });
       expect(bytesToHex(enc)).toBe(vector.expected_enc_hex);
       expect(bytesToHex(ss)).toBe(vector.expected_ss_hex);
     });

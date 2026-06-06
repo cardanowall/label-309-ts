@@ -3,8 +3,9 @@
 // Two mutually-exclusive on-wire paths:
 //   * `enc.slots[]` (sealed-recipient, X25519 ECIES) — invokes
 //     `eciesSealedPoeUnwrap` from `@cardanowall/crypto-core/sealed-poe`.
-//   * `enc.passphrase` (Argon2id-derived CEK) — derives the CEK and runs
-//     the AEAD primitive directly (empty AAD on the passphrase path).
+//   * `enc.passphrase` (Argon2id-derived CEK) — derives the CEK, derives a
+//     content `payload_key` from it, and opens the AEAD under a structured AAD
+//     that binds the passphrase-KDF parameters.
 //
 // After successful unwrap (either path), the verifier recomputes every
 // content-hash entry in `item.hashes` and compares to the recovered plaintext.
@@ -14,7 +15,10 @@ import { argon2idV13 } from '@cardanowall/crypto-core/kdf';
 import { xchacha20Poly1305Decrypt, AeadVerificationError } from '@cardanowall/crypto-core/aead';
 import { blake2b256, sha256 } from '@cardanowall/crypto-core/hash';
 import {
+  adContentPassphrase,
+  assertCiphertextWithinBound,
   eciesSealedPoeUnwrap,
+  passphrasePayloadKey,
   sealedEnvelopeFromParsed,
 } from '@cardanowall/crypto-core/sealed-poe';
 import { compareCt } from '@cardanowall/crypto-core/util';
@@ -33,8 +37,54 @@ import type {
 // The v1 passphrase KDF registry has a single member.
 const PASSPHRASE_KDF_ARGON2ID = 'argon2id' as const;
 
-// Content-AEAD AAD is an empty bstr on the passphrase path.
-const EMPTY_AAD = new Uint8Array(0);
+// Maximum raw passphrase length, in UTF-8 bytes, enforced BEFORE normalization
+// and the Argon2id KDF. An oversized passphrase would otherwise drive
+// unbounded NFKC / whitespace-collapse work and a large Argon2id input before
+// any cost-bounded primitive runs; capping the raw input closes that pre-KDF
+// DoS. The bound is byte length (not code-point count), so a short string of
+// wide multi-byte characters is still measured by its encoded size. 4096 bytes
+// is far above any human-chosen passphrase. Identical across every SDK.
+export const MAX_PASSPHRASE_INPUT_BYTES = 4096;
+
+// The 25 codepoints carrying the Unicode `White_Space` property under Unicode
+// 16.0. The passphrase normalization profile collapses every maximal run of
+// these to a single U+0020. This is an explicit set on purpose: neither a regex
+// `\s` class nor a language `isWhitespace` predicate matches this set exactly,
+// and the CEK derivation must be byte-identical across implementations. Exported
+// so the exact membership can be pinned by a test, the same way the Python twin
+// pins its frozenset.
+export const UNICODE_WHITE_SPACE = new Set<number>([
+  0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x0085, 0x00a0, 0x1680, 0x2000, 0x2001, 0x2002,
+  0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f,
+  0x3000,
+]);
+
+// Passphrase normalization profile `cardano-poe-pw-norm-v1`, applied in order:
+// NFKC (UAX #15, Unicode 16.0), collapse every maximal run of White_Space to a
+// single U+0020, trim leading/trailing, then UTF-8. The producer applies the
+// identical transform, so a single divergence here yields a CEK that fails to
+// decrypt an honest record. Exported so the cross-implementation normalization
+// contract can be pinned directly by tests, independent of a full decrypt run.
+export function normalizePassphrase(passphrase: string): Uint8Array {
+  const nfkc = passphrase.normalize('NFKC');
+  let collapsed = '';
+  let inRun = false;
+  for (const ch of nfkc) {
+    if (UNICODE_WHITE_SPACE.has(ch.codePointAt(0)!)) {
+      if (!inRun) {
+        collapsed += ' ';
+        inRun = true;
+      }
+    } else {
+      collapsed += ch;
+      inRun = false;
+    }
+  }
+  // Trim a single leading/trailing collapsed U+0020 (runs already collapsed).
+  if (collapsed.startsWith(' ')) collapsed = collapsed.slice(1);
+  if (collapsed.endsWith(' ')) collapsed = collapsed.slice(0, -1);
+  return new TextEncoder().encode(collapsed);
+}
 
 export interface TryDecryptionsArgs {
   readonly record: PoeRecord;
@@ -245,10 +295,16 @@ async function decryptPassphrase(args: {
   if (enc.passphrase.alg !== PASSPHRASE_KDF_ARGON2ID) {
     throw new Error(`KDF_DERIVATION_FAILED: unsupported passphrase alg ${enc.passphrase.alg}`);
   }
-  // Passphrase normalisation: NFKC → collapse whitespace → trim → UTF-8. Must
-  // match the producer's normalisation exactly or the derived CEK won't match.
-  const normalised = passphrase.normalize('NFKC').replace(/\s+/g, ' ').trim();
-  const password = new TextEncoder().encode(normalised);
+  // Pre-KDF input cap: reject an oversized raw passphrase before normalization
+  // or Argon2id, so it cannot drive unbounded pre-KDF work. Byte length of the
+  // raw UTF-8 encoding, not code-point count.
+  const rawPassphraseBytes = new TextEncoder().encode(passphrase).length;
+  if (rawPassphraseBytes > MAX_PASSPHRASE_INPUT_BYTES) {
+    throw new Error(
+      `KDF_DERIVATION_FAILED: passphrase length ${rawPassphraseBytes} bytes exceeds the maximum ${MAX_PASSPHRASE_INPUT_BYTES} bytes`,
+    );
+  }
+  const password = normalizePassphrase(passphrase);
   let cek: Uint8Array;
   try {
     cek = await argon2idV13({
@@ -266,10 +322,25 @@ async function decryptPassphrase(args: {
   if (enc.aead !== 'xchacha20-poly1305') {
     throw new Error(`KDF_DERIVATION_FAILED: unsupported aead ${enc.aead}`);
   }
-  return xchacha20Poly1305Decrypt({
-    key: cek,
+  // Reject an over-large ciphertext before the single-shot AEAD open.
+  assertCiphertextWithinBound(ciphertext.length);
+  // Content is opened under a derived payload_key, with a structured AAD that
+  // binds the passphrase-KDF parameters: tampering with `salt` or any `params`
+  // value after encryption changes the AAD and makes the AEAD open fail. The
+  // normalization profile id is pinned into the AAD as a scheme-fixed constant.
+  const payloadKey = passphrasePayloadKey({ cek, nonce: enc.nonce });
+  const aad = adContentPassphrase({
     nonce: enc.nonce,
-    aad: EMPTY_AAD,
+    passphrase: {
+      alg: enc.passphrase.alg,
+      salt: enc.passphrase.salt,
+      params: enc.passphrase.params,
+    },
+  });
+  return xchacha20Poly1305Decrypt({
+    key: payloadKey,
+    nonce: enc.nonce,
+    aad,
     ciphertext,
   });
 }

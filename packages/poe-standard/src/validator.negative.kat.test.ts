@@ -582,6 +582,95 @@ describe('validator — hybrid mlkem768x25519 slot-shape negatives', () => {
   });
 });
 
+// Resource bounds — the slot-count cap and the decoded-envelope byte backstop.
+// These are not in the frozen shared corpus because their inputs are large
+// (over-bound slot arrays built programmatically); the corpus carries only the
+// cheap duplicate cases. Constants mirror the sealed-PoE unwrap layer
+// (MAX_SLOTS = 1024, decoded-envelope bound 65536 bytes).
+describe('validator — enc resource bounds (slot-count cap + decoded-envelope size)', () => {
+  const MAX_SLOTS = 1024;
+  const MAX_DECODED_ENVELOPE_BYTES = 65536;
+  const NONCE_LENGTH = 24;
+  const SLOTS_MAC_LENGTH = 32;
+
+  function distinctEpkSlots(n: number): Array<{ epk: Uint8Array; wrap: Uint8Array }> {
+    const slots: Array<{ epk: Uint8Array; wrap: Uint8Array }> = [];
+    for (let i = 0; i < n; i++) {
+      const epk = new Uint8Array(32);
+      // 32-byte big-endian counter keeps every epk distinct, so the slot-count
+      // cap — not the duplicate check — is what trips.
+      epk[31] = i & 0xff;
+      epk[30] = (i >> 8) & 0xff;
+      slots.push({ epk, wrap: new Uint8Array(48) });
+    }
+    return slots;
+  }
+
+  function codesOf(rec: Uint8Array): Set<string> {
+    const result = validatePoeRecord(rec);
+    if (result.ok) return new Set();
+    return new Set(result.issues.map((i) => i.code));
+  }
+
+  it('MAX_SLOTS + 1 slots -> sole code ENC_SLOTS_TOO_MANY', () => {
+    // MAX_SLOTS + 1 trips the slot-count cap, which short-circuits the byte
+    // backstop, so ENC_SLOTS_TOO_MANY is the sole emitted code even though the
+    // x25519 array would also exceed the byte bound at that count.
+    const rec = recordWithEnc({ ...sealedBase(), slots: distinctEpkSlots(MAX_SLOTS + 1) });
+    expect(codesOf(rec)).toEqual(new Set(['ENC_SLOTS_TOO_MANY']));
+  });
+
+  it('x25519 array at the byte backstop validates; one slot over -> ENC_ENVELOPE_TOO_LARGE', () => {
+    // x25519 per-slot bytes = 32 + 48 = 80. The byte backstop is the tighter
+    // guard at this width (it trips below MAX_SLOTS), so the largest accepted
+    // count is the floor below the bound; one more trips ENC_ENVELOPE_TOO_LARGE.
+    const perSlot = 32 + 48;
+    const justUnder = Math.floor(
+      (MAX_DECODED_ENVELOPE_BYTES - NONCE_LENGTH - SLOTS_MAC_LENGTH) / perSlot,
+    );
+    expect(justUnder).toBeLessThan(MAX_SLOTS);
+    const ok = recordWithEnc({ ...sealedBase(), slots: distinctEpkSlots(justUnder) });
+    expect(validatePoeRecord(ok).ok).toBe(true);
+    const over = recordWithEnc({ ...sealedBase(), slots: distinctEpkSlots(justUnder + 1) });
+    expect(codesOf(over)).toEqual(new Set(['ENC_ENVELOPE_TOO_LARGE']));
+  });
+
+  it('decoded envelope above the byte backstop -> ENC_ENVELOPE_TOO_LARGE (hybrid, below MAX_SLOTS)', () => {
+    // Hybrid per-slot bytes = 1120 + 48 = 1168. The smallest slot count whose
+    // decoded envelope exceeds the bound is below MAX_SLOTS, so the byte
+    // backstop (not the slot cap) is the active guard.
+    const perSlot = MLKEM768X25519_ENC_LENGTH + 48;
+    const over =
+      Math.floor((MAX_DECODED_ENVELOPE_BYTES - NONCE_LENGTH - SLOTS_MAC_LENGTH) / perSlot) + 1;
+    expect(over).toBeLessThanOrEqual(MAX_SLOTS);
+    const slots = Array.from({ length: over }, (_, i) => {
+      // Distinct kem_ct per slot so the duplicate check does not fire instead.
+      const body = new Uint8Array(MLKEM768X25519_ENC_LENGTH);
+      body[0] = i & 0xff;
+      body[1] = (i >> 8) & 0xff;
+      return { kem_ct: chunk64(body), wrap: new Uint8Array(48) };
+    });
+    const rec = recordWithEnc({ ...sealedHybridBase(), slots });
+    expect(codesOf(rec)).toEqual(new Set(['ENC_ENVELOPE_TOO_LARGE']));
+  });
+
+  it('decoded envelope exactly at the byte backstop validates (hybrid just-below)', () => {
+    const perSlot = MLKEM768X25519_ENC_LENGTH + 48;
+    const justUnder = Math.floor(
+      (MAX_DECODED_ENVELOPE_BYTES - NONCE_LENGTH - SLOTS_MAC_LENGTH) / perSlot,
+    );
+    const slots = Array.from({ length: justUnder }, (_, i) => {
+      const body = new Uint8Array(MLKEM768X25519_ENC_LENGTH);
+      body[0] = i & 0xff;
+      body[1] = (i >> 8) & 0xff;
+      return { kem_ct: chunk64(body), wrap: new Uint8Array(48) };
+    });
+    const rec = recordWithEnc({ ...sealedHybridBase(), slots });
+    const result = validatePoeRecord(rec);
+    expect(result.ok).toBe(true);
+  });
+});
+
 // Shared cross-SDK negative KAT corpus. Each vector pins the EXACT set of
 // structural codes `validatePoeRecord` emits for a byte-frozen CBOR record, so
 // the TS / Python / Rust validators stay code-for-code identical. An empty

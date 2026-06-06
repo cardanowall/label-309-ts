@@ -32,12 +32,25 @@ import { chacha20Poly1305Decrypt } from '../aead/chacha20-poly1305';
 import { AeadVerificationError } from '../aead/errors';
 import { xchacha20Poly1305Decrypt } from '../aead/xchacha20-poly1305';
 import { hkdfSha256 } from '../kdf/hkdf';
-import { mlkem768x25519Decapsulate, MLKEM768X25519_ENC_LENGTH } from '../kem/mlkem768x25519';
+import {
+  mlkem768x25519Decapsulate,
+  mlkem768x25519Keygen,
+  MLKEM768X25519_ENC_LENGTH,
+} from '../kem/mlkem768x25519';
 import { x25519Ecdh, X25519LowOrderPointError, x25519PublicKey } from '../kem/x25519';
 import { compareCt } from '../util/compare-ct';
 
 import { EciesSealedPoeError } from './errors';
-import { joinKemCt, slotsToMacCbor } from './slots-codec';
+import { joinKemCt } from './slots-codec';
+import {
+  adContentSlots,
+  assertCiphertextWithinBound,
+  computeSlotsHash,
+  MAX_DECODED_ENVELOPE_BYTES,
+  MAX_SLOTS,
+  slotsPayloadKey,
+  xwingKekSalt,
+} from './transcript';
 import {
   CARDANO_POE_HKDF_INFO_KEK,
   CARDANO_POE_HKDF_INFO_KEK_MLKEM768X25519,
@@ -160,6 +173,16 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   return out;
 }
 
+// Stable string key for a byte string, used only for the per-slot KEM-material
+// duplicate check (a structural pre-trial gate, not a constant-time comparison).
+function bytesKey(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) {
+    s += String.fromCharCode(bytes[i]!);
+  }
+  return s;
+}
+
 // Partitioning-oracle defence: every wire
 // length MUST be validated before any KEM/AEAD primitive is invoked, so malformed
 // records cannot probe per-slot failure ordering. Shared between
@@ -196,6 +219,15 @@ function assertEnvelopeStructure(
   if (n < 1) {
     throw new EciesSealedPoeError('ENC_SLOTS_EMPTY', `envelope.slots.length=${n} must be >= 1`);
   }
+  // Resource bound: reject an envelope with more than MAX_SLOTS slots before any
+  // KEM/AEAD primitive runs, so a malformed record cannot drive unbounded
+  // per-slot work. Checked before the per-slot length loop below.
+  if (n > MAX_SLOTS) {
+    throw new EciesSealedPoeError(
+      'ENC_SLOTS_TOO_MANY',
+      `envelope.slots.length=${n} exceeds MAX_SLOTS=${MAX_SLOTS}`,
+    );
+  }
   if (envelope.nonce.length !== NONCE_LENGTH) {
     throw new EciesSealedPoeError(
       'NONCE_LENGTH_MISMATCH',
@@ -212,6 +244,14 @@ function assertEnvelopeStructure(
   // Per-slot length pre-checks — KEM-driven. ALL slots are validated here,
   // before any decapsulation, so the trial-decrypt loop never observes a
   // malformed slot (partitioning-oracle-safe ordering).
+  //
+  // Per-slot KEK uniqueness is also enforced here. The zero-nonce per-slot wrap
+  // is safe only because each slot draws fresh KEM randomness, so its KEK is
+  // unique; two slots sharing the same KEM material derive the same KEK and
+  // repeat a (KEK, zero-nonce) pair. The KEM material that fixes the KEK is the
+  // `epk` (x25519) or the reassembled `kem_ct` (hybrid) — both bound into the
+  // KEK salt — so a repeat of either across slots is rejected outright.
+  const seenKemMaterial = new Set<string>();
   if (envelope.kem === 'x25519') {
     for (let i = 0; i < n; i++) {
       const slot = envelope.slots[i]!;
@@ -227,6 +267,14 @@ function assertEnvelopeStructure(
           `envelope.slots[${i}].wrap MUST be exactly ${WRAP_LENGTH} bytes, got ${slot.wrap.length}`,
         );
       }
+      const key = bytesKey(slot.epk);
+      if (seenKemMaterial.has(key)) {
+        throw new EciesSealedPoeError(
+          'ENC_SLOTS_DUPLICATE_KEM_MATERIAL',
+          `envelope.slots[${i}].epk duplicates an earlier slot — per-slot KEK uniqueness is violated`,
+        );
+      }
+      seenKemMaterial.add(key);
     }
   } else {
     for (let i = 0; i < n; i++) {
@@ -244,7 +292,34 @@ function assertEnvelopeStructure(
           `envelope.slots[${i}].wrap MUST be exactly ${WRAP_LENGTH} bytes, got ${slot.wrap.length}`,
         );
       }
+      const key = bytesKey(enc);
+      if (seenKemMaterial.has(key)) {
+        throw new EciesSealedPoeError(
+          'ENC_SLOTS_DUPLICATE_KEM_MATERIAL',
+          `envelope.slots[${i}].kem_ct duplicates an earlier slot — per-slot KEK uniqueness is violated`,
+        );
+      }
+      seenKemMaterial.add(key);
     }
+  }
+
+  // Decoded-envelope byte backstop. Every per-slot field above is validated to a
+  // fixed length, so the decoded envelope's aggregate size is determined here:
+  // nonce + slots_mac + per-slot (epk|kem_ct + wrap). Reject before any KEM/AEAD
+  // primitive when it exceeds the bound — a tighter resource cap than MAX_SLOTS
+  // for honest records, and the bound a parser that can see the decoded size
+  // enforces. (The slot-count cap above already bounds work; this is the byte
+  // backstop the spec also pins.)
+  const perSlotBytes =
+    envelope.kem === 'x25519'
+      ? X25519_PUBLIC_KEY_LENGTH + WRAP_LENGTH
+      : MLKEM768X25519_ENC_LENGTH + WRAP_LENGTH;
+  const decodedEnvelopeBytes = NONCE_LENGTH + SLOTS_MAC_LENGTH + n * perSlotBytes;
+  if (decodedEnvelopeBytes > MAX_DECODED_ENVELOPE_BYTES) {
+    throw new EciesSealedPoeError(
+      'ENC_ENVELOPE_TOO_LARGE',
+      `decoded envelope size ${decodedEnvelopeBytes} exceeds MAX_DECODED_ENVELOPE_BYTES=${MAX_DECODED_ENVELOPE_BYTES}`,
+    );
   }
 
   if (multiPrivKeys !== undefined) {
@@ -266,93 +341,89 @@ function assertEnvelopeStructure(
   }
 }
 
-// Classical (x25519) per-slot recovery body. Returns the CEK on the first
-// AEAD-tag success; null otherwise. `liveSlot` distinguishes the real-work path
-// (attempt the AEAD unwrap) from the constant-time-N dummy path (do the ECDH +
-// HKDF but skip the AEAD, since a CEK is already in hand).
+// All-zero IKM for the dummy KEK an invalid-ECDH slot derives so it pays the
+// same HKDF work as a live slot (see `tryX25519Slot`).
+const ZERO_IKM_32: Uint8Array = new Uint8Array(32);
+
+// Classical (x25519) per-slot recovery body. Returns the candidate CEK on an
+// AEAD-tag success; null otherwise. The AEAD is attempted on EVERY slot (no
+// match-position-dependent skip), so a per-priv scan recovers a candidate CEK
+// from each slot the recipient is addressed in — which is what the inner loop's
+// CEK-conflict detection needs. Attempting the AEAD on every slot also makes the
+// per-slot timing more uniform, not less: every slot pays the identical
+// ECDH + HKDF + AEAD-open cost regardless of where the match lands.
+//
+// Acceptance is `kem_ok AND open_ok`. `kem_ok` is the X25519 validity bit: a
+// small-order `epk` drives the shared secret to all-zero, which RFC 7748 §6.1
+// rejects. @noble/curves signals this by THROWING from `getSharedSecret`, so a
+// fully branchless ct-select over the shared secret is not expressible against
+// this library API. The next-best, equivalent form is taken instead: on the
+// all-zero rejection the slot derives a DUMMY KEK from `ikm=0^32` (same
+// salt/info) so it performs the identical HKDF work, then returns a non-match
+// WITHOUT attempting the AEAD — so an invalid-ECDH slot can never be accepted
+// regardless of the wrap outcome (`kem_ok=false` ⟹ the AEAD is never reached),
+// while the failed path still costs the same per-slot KEK derivation as a live
+// one.
 function tryX25519Slot(args: {
   slot: X25519Slot;
   recipientSecretKey: Uint8Array;
   pubRLocal: Uint8Array;
-  liveSlot: boolean;
 }): Uint8Array | null {
-  // A slot's `epk` is attacker-influenceable wire data. A small-order
-  // Montgomery point makes the X25519 shared secret all-zero, which the KEM
-  // rejects per RFC 7748 §6.1. Such a slot can never have been produced by a
-  // conformant wrap for THIS recipient, so it is a non-match — handled here
-  // identically to an AEAD-tag failure (skip the slot, keep iterating so the
-  // constant-time-N loop shape is preserved). Only the contributory-check
-  // rejection is swallowed; any other error propagates.
-  if (args.liveSlot) {
-    try {
-      const shared = x25519Ecdh({
-        secretKey: args.recipientSecretKey,
-        theirPublicKey: args.slot.epk,
-      });
-      const kek = hkdfSha256({
-        ikm: shared,
-        salt: concat(args.slot.epk, args.pubRLocal),
-        info: CARDANO_POE_HKDF_INFO_KEK,
-        length: 32,
-      });
-      return chacha20Poly1305Decrypt({
-        key: kek,
-        nonce: ZERO_NONCE_12,
-        aad: CARDANO_POE_HKDF_INFO_KEK,
-        ciphertext: args.slot.wrap,
-      });
-    } catch (e) {
-      if (!(e instanceof AeadVerificationError) && !(e instanceof X25519LowOrderPointError)) {
-        throw e;
-      }
-      return null;
-    }
-  }
-  // Constant-time-N dummy path: mirror the real-work ECDH + HKDF, still
-  // tolerating a low-order epk in a later slot so it cannot turn a successful
-  // unwrap into a throw.
+  const salt = concat(args.slot.epk, args.pubRLocal);
+  let shared: Uint8Array;
   try {
-    const shared = x25519Ecdh({
+    shared = x25519Ecdh({
       secretKey: args.recipientSecretKey,
       theirPublicKey: args.slot.epk,
     });
-    hkdfSha256({
-      ikm: shared,
-      salt: concat(args.slot.epk, args.pubRLocal),
-      info: CARDANO_POE_HKDF_INFO_KEK,
-      length: 32,
-    });
   } catch (e) {
     if (!(e instanceof X25519LowOrderPointError)) throw e;
+    // kem_ok = false. Derive the dummy KEK so the failed slot pays the same
+    // HKDF cost a live slot would, then short-circuit to a non-match: the AEAD
+    // is never attempted, so this slot can never be accepted.
+    hkdfSha256({ ikm: ZERO_IKM_32, salt, info: CARDANO_POE_HKDF_INFO_KEK, length: 32 });
+    return null;
   }
-  return null;
+  // kem_ok = true. Derive the real KEK and attempt the wrap AEAD.
+  const kek = hkdfSha256({ ikm: shared, salt, info: CARDANO_POE_HKDF_INFO_KEK, length: 32 });
+  try {
+    return chacha20Poly1305Decrypt({
+      key: kek,
+      nonce: ZERO_NONCE_12,
+      aad: CARDANO_POE_HKDF_INFO_KEK,
+      ciphertext: args.slot.wrap,
+    });
+  } catch (e) {
+    if (!(e instanceof AeadVerificationError)) throw e;
+    return null;
+  }
 }
 
 // Hybrid (mlkem768x25519) per-slot recovery body. X-Wing decapsulate NEVER
 // throws on attacker wire data (ML-KEM implicit rejection), so there is no
 // try/catch: a wrong shared secret simply yields a KEK that fails the AEAD tag.
-// The dummy (constant-time-N) path runs a FULL decapsulate + HKDF so matching
-// and non-matching slots cost the same X-Wing work.
+// As in the classical body, the AEAD is attempted on EVERY slot (full
+// decapsulate + HKDF + AEAD-open) so matching and non-matching slots cost the
+// same X-Wing work and a per-priv scan recovers a candidate CEK from every slot
+// the recipient is addressed in.
 function tryMlkem768X25519Slot(args: {
   slot: Mlkem768X25519Slot;
   recipientSecretKey: Uint8Array;
-  liveSlot: boolean;
+  pubR: Uint8Array;
 }): Uint8Array | null {
   // kem_ct length was validated to reassemble to MLKEM768X25519_ENC_LENGTH in
   // assertEnvelopeStructure, so this join + decapsulate is constant-work.
   const enc = joinKemCt(args.slot.kem_ct);
   const ss = mlkem768x25519Decapsulate({ secretSeed: args.recipientSecretKey, enc });
+  // The KEK salt binds the slot's own reassembled ciphertext and the recipient's
+  // own X-Wing public key (recomputed from the held seed), exactly as the
+  // producer bound them — see the wrap path.
   const kek = hkdfSha256({
     ikm: ss,
-    salt: EMPTY_SALT,
+    salt: xwingKekSalt({ kemCt: enc, pubR: args.pubR }),
     info: CARDANO_POE_HKDF_INFO_KEK_MLKEM768X25519,
     length: 32,
   });
-  if (!args.liveSlot) {
-    // Dummy path: full decapsulate + HKDF already done above; skip only the
-    // AEAD attempt (a CEK is already in hand).
-    return null;
-  }
   try {
     return chacha20Poly1305Decrypt({
       key: kek,
@@ -366,18 +437,57 @@ function tryMlkem768X25519Slot(args: {
   }
 }
 
-// Per-priv inner trial-decrypt loop with slot-index reporting, KEM-driven.
-// Enters every slot when constantTimeN; the dummy path keeps per-iteration cost
-// uniform regardless of which slot matched.
+// The recovered CEK plus a defence-in-depth conflict flag. A producer may
+// legitimately address the same recipient (or wrap the same CEK) in several
+// slots, so multiple matching slots are PERMITTED and the first match's CEK is
+// selected. But two matching slots that recover DIFFERENT CEKs (both satisfying
+// their per-slot wrap AEAD) is a commitment collision the §G4 assumption rules
+// out; `cekConflict` flags it so the caller can fail closed. The compare is
+// constant-time; the inner loop visits every slot (constant-time-N), so the
+// flag does not leak match position.
+interface InnerUnwrapResult {
+  readonly cek: Uint8Array;
+  readonly slotIdx: number;
+  readonly cekConflict: boolean;
+}
+
+// Per-priv inner trial-decrypt loop with slot-index reporting and CEK-conflict
+// detection, KEM-driven. Enters every slot when constantTimeN; every slot
+// attempts the wrap AEAD, so a recipient addressed in multiple slots recovers a
+// candidate CEK from each. The first match's CEK is selected; any later match
+// recovering a CEK that differs (constant-time compare) from the selected one
+// sets `cekConflict`. This follows the spec loop shape:
+//
+//   first        = ok AND NOT found
+//   cek_conflict = cek_conflict OR (ok AND found AND NOT ctEq(cand, selected))
+//   selected_CEK = first ? cand : selected
+//   found        = found OR ok
+//
+// No early break is taken when constantTimeN, so the conflict scan is constant
+// across the whole slot set.
 function tryRecipientUnwrapWithIdx(
   envelope: SealedEnvelope,
   recipientSecretKey: Uint8Array,
   constantTimeN: boolean,
   slotsAttemptedOut: { count: number; perPrivCounts?: number[] } | undefined,
-): { cek: Uint8Array; slotIdx: number } | null {
+): InnerUnwrapResult | null {
   const n = envelope.slots.length;
   let cek: Uint8Array | null = null;
   let matchedSlotIdx = -1;
+  let cekConflict = false;
+
+  const recordMatch = (candidate: Uint8Array | null, i: number): void => {
+    if (candidate === null) return;
+    if (cek === null) {
+      // first = ok AND NOT found.
+      cek = candidate;
+      matchedSlotIdx = i;
+    } else if (!compareCt(candidate, cek)) {
+      // ok AND found AND NOT ctEq(cand, selected) — a later matching slot whose
+      // recovered CEK differs from the already-selected one. Fail closed.
+      cekConflict = true;
+    }
+  };
 
   if (envelope.kem === 'x25519') {
     const pubRLocal = x25519PublicKey({ secretKey: recipientSecretKey });
@@ -385,60 +495,38 @@ function tryRecipientUnwrapWithIdx(
       if (slotsAttemptedOut !== undefined) {
         slotsAttemptedOut.count = i + 1;
       }
-      const candidate = tryX25519Slot({
-        slot: envelope.slots[i]!,
-        recipientSecretKey,
-        pubRLocal,
-        liveSlot: cek === null,
-      });
-      if (cek === null && candidate !== null) {
-        cek = candidate;
-        matchedSlotIdx = i;
-      }
+      recordMatch(tryX25519Slot({ slot: envelope.slots[i]!, recipientSecretKey, pubRLocal }), i);
       if (cek !== null && !constantTimeN) break;
     }
   } else {
+    // Recompute the recipient's own X-Wing public key from the held seed: the
+    // hybrid KEK salt binds `pub_R`, so each private key in a multi-key scan
+    // MUST re-derive it (a single shared pub_R would compute the wrong KEK for
+    // every key but one).
+    const pubR = mlkem768x25519Keygen(recipientSecretKey).publicKey;
     for (let i = 0; i < n; i++) {
       if (slotsAttemptedOut !== undefined) {
         slotsAttemptedOut.count = i + 1;
       }
-      const candidate = tryMlkem768X25519Slot({
-        slot: envelope.slots[i]!,
-        recipientSecretKey,
-        liveSlot: cek === null,
-      });
-      if (cek === null && candidate !== null) {
-        cek = candidate;
-        matchedSlotIdx = i;
-      }
+      recordMatch(tryMlkem768X25519Slot({ slot: envelope.slots[i]!, recipientSecretKey, pubR }), i);
       if (cek !== null && !constantTimeN) break;
     }
   }
-  return cek === null ? null : { cek, slotIdx: matchedSlotIdx };
+  return cek === null ? null : { cek, slotIdx: matchedSlotIdx, cekConflict };
 }
 
-// Back-compat wrapper preserved for callers that only care about the CEK
-// (single-priv path inside `eciesSealedPoeUnwrap`).
-function tryRecipientUnwrap(
-  envelope: SealedEnvelope,
-  recipientSecretKey: Uint8Array,
-  constantTimeN: boolean,
-  slotsAttemptedOut: { count: number; perPrivCounts?: number[] } | undefined,
-): Uint8Array | null {
-  return (
-    tryRecipientUnwrapWithIdx(envelope, recipientSecretKey, constantTimeN, slotsAttemptedOut)
-      ?.cek ?? null
-  );
-}
-
-// Slot-set MAC bytes, KEM-driven so the hybrid kem_ct is
-// committed exactly as it appears on-wire. Constant across the multi-priv outer
-// loop (depends only on envelope.slots), so callers compute it once.
-function slotsMacCborBytes(envelope: SealedEnvelope): Uint8Array {
-  return slotsToMacCbor(
-    envelope.slots as ReadonlyArray<X25519Slot | Mlkem768X25519Slot>,
-    envelope.kem,
-  );
+// 32-byte slots-transcript hash. The transcript binds the cross-KEM header
+// fields (scheme, path, aead, kem, nonce) to the canonicalised slot set, so the
+// hybrid kem_ct is committed by its bytes (chunk-boundary-invariant). It depends
+// only on the header and the slots, so it is constant across the multi-priv
+// outer loop and the per-slot trial-decrypt loop — callers compute it ONCE and
+// re-key the HMAC from each candidate CEK over this same 32-byte message.
+function slotsHashBytes(envelope: SealedEnvelope): Uint8Array {
+  return computeSlotsHash({
+    kem: envelope.kem,
+    nonce: envelope.nonce,
+    slots: envelope.slots as ReadonlyArray<X25519Slot | Mlkem768X25519Slot>,
+  });
 }
 
 export function eciesSealedPoeUnwrap(args: UnwrapArgs): UnwrapResult {
@@ -488,44 +576,56 @@ export function eciesSealedPoeUnwrap(args: UnwrapArgs): UnwrapResult {
     assertEnvelopeStructure(envelope, undefined, (args as UnwrapArgsSinglePriv).recipientSecretKey);
   }
 
+  // Reject a ciphertext at or above the single-shot keystream capacity before
+  // any KEM/AEAD work, so an over-large blob never reaches the content open.
+  assertCiphertextWithinBound(ciphertext.length);
+
   // Trial-decrypt loop. With constantTimeN=true the loop
   // entries are uniform regardless of match position; the per-iteration body
   // does the same KEM + HKDF work in both branches.
+
+  // The slots-transcript hash is constant across both the single-priv MAC check
+  // and the multi-priv outer loop — compute it ONCE, then re-key the HMAC from
+  // each candidate CEK over this same 32-byte message.
+  const slotsHash = slotsHashBytes(envelope);
 
   let matchedCek: Uint8Array | null = null;
   let anyCandidateRecovered = false;
 
   if (hasSingle) {
     const recipientSecretKey = (args as UnwrapArgsSinglePriv).recipientSecretKey;
-    const cek = tryRecipientUnwrap(
+    const candidate = tryRecipientUnwrapWithIdx(
       envelope,
       recipientSecretKey,
       constantTimeN,
       args._slotsAttemptedOut,
     );
-    if (cek === null) {
+    if (candidate === null) {
       return { matched: false, reason: 'WRONG_RECIPIENT_KEY' };
+    }
+    // CEK-conflict defence-in-depth: a later matching slot recovered a CEK that
+    // differs from the selected one. Fail closed with the generic tampered-header
+    // reason (a commitment collision is a broken/anomalous slot set, not a
+    // recipient-key mismatch).
+    if (candidate.cekConflict) {
+      return { matched: false, reason: 'TAMPERED_HEADER' };
     }
     // Slot-set MAC verification. Use compareCt to
     // avoid leaking byte-position via early-exit on first mismatching byte.
-    const slotsCbor = slotsMacCborBytes(envelope);
     const hmacKey = hkdfSha256({
-      ikm: cek,
+      ikm: candidate.cek,
       salt: EMPTY_SALT,
       info: CARDANO_POE_HKDF_INFO_SLOTS_MAC,
       length: 32,
     });
-    const slotsMacCalc = hmac(sha256, hmacKey, slotsCbor);
+    const slotsMacCalc = hmac(sha256, hmacKey, slotsHash);
     if (!compareCt(slotsMacCalc, envelope.slots_mac)) {
       return { matched: false, reason: 'TAMPERED_HEADER' };
     }
-    matchedCek = cek;
+    matchedCek = candidate.cek;
   } else {
-    // The slots-CBOR is constant across the outer loop (depends only on
-    // envelope.slots) — compute once before the loop to keep per-priv cost
-    // identical to the single-priv path.
-    const slotsCbor = slotsMacCborBytes(envelope);
     const recipientSecretKeys = multiPrivKeys!;
+    let cekConflict = false;
     for (let k = 0; k < recipientSecretKeys.length; k++) {
       if (args._privsAttemptedOut !== undefined) {
         args._privsAttemptedOut.count = k + 1;
@@ -533,7 +633,7 @@ export function eciesSealedPoeUnwrap(args: UnwrapArgs): UnwrapResult {
       if (args._slotsAttemptedOut !== undefined) {
         args._slotsAttemptedOut.count = 0;
       }
-      const cek = tryRecipientUnwrap(
+      const candidate = tryRecipientUnwrapWithIdx(
         envelope,
         recipientSecretKeys[k]!,
         constantTimeN,
@@ -542,7 +642,12 @@ export function eciesSealedPoeUnwrap(args: UnwrapArgs): UnwrapResult {
       if (args._slotsAttemptedOut?.perPrivCounts !== undefined) {
         args._slotsAttemptedOut.perPrivCounts.push(args._slotsAttemptedOut.count);
       }
-      if (cek === null) continue;
+      if (candidate === null) continue;
+      // A per-priv CEK conflict (two of this priv's slots recovering different
+      // CEKs) makes the whole record anomalous regardless of which priv matched
+      // the MAC — record it and fail closed after the loop.
+      if (candidate.cekConflict) cekConflict = true;
+      const cek = candidate.cek;
       // Slot-set MAC verification per priv that recovered a candidate CEK.
       const hmacKey = hkdfSha256({
         ikm: cek,
@@ -550,7 +655,7 @@ export function eciesSealedPoeUnwrap(args: UnwrapArgs): UnwrapResult {
         info: CARDANO_POE_HKDF_INFO_SLOTS_MAC,
         length: 32,
       });
-      const slotsMacCalc = hmac(sha256, hmacKey, slotsCbor);
+      const slotsMacCalc = hmac(sha256, hmacKey, slotsHash);
       // The outer cross-priv loop short-circuits on the first priv whose
       // recovered CEK also passes slots_mac. This intentionally leaks "which
       // priv matched" → "how many key rotations the recipient has performed".
@@ -568,6 +673,11 @@ export function eciesSealedPoeUnwrap(args: UnwrapArgs): UnwrapResult {
       }
       anyCandidateRecovered = true;
     }
+    // A CEK conflict on the matching priv fails the record closed, even if its
+    // first-slot CEK passed slots_mac.
+    if (matchedCek !== null && cekConflict) {
+      return { matched: false, reason: 'TAMPERED_HEADER' };
+    }
     if (matchedCek === null) {
       return {
         matched: false,
@@ -576,11 +686,18 @@ export function eciesSealedPoeUnwrap(args: UnwrapArgs): UnwrapResult {
     }
   }
 
-  // Content AEAD AAD is `nonce || slots_mac`.
-  const adContent = concat(envelope.nonce, envelope.slots_mac);
+  // Content is opened under the derived `payload_key`, with the structured
+  // slots-path AAD re-binding the header plus `slots_hash` and `slots_mac`.
+  const payloadKey = slotsPayloadKey({ cek: matchedCek, nonce: envelope.nonce });
+  const adContent = adContentSlots({
+    kem: envelope.kem,
+    nonce: envelope.nonce,
+    slotsHash,
+    slotsMac: envelope.slots_mac,
+  });
   try {
     const plaintext = xchacha20Poly1305Decrypt({
-      key: matchedCek,
+      key: payloadKey,
       nonce: envelope.nonce,
       aad: adContent,
       ciphertext,
@@ -633,7 +750,7 @@ export function eciesSealedPoeTrialDecrypt(args: TrialDecryptOnlyArgs): TrialDec
   }
   assertEnvelopeStructure(envelope, recipientSecretKeys, undefined);
 
-  const slotsCbor = slotsMacCborBytes(envelope);
+  const slotsHash = slotsHashBytes(envelope);
 
   let anyCandidateRecovered = false;
   for (let k = 0; k < recipientSecretKeys.length; k++) {
@@ -653,13 +770,22 @@ export function eciesSealedPoeTrialDecrypt(args: TrialDecryptOnlyArgs): TrialDec
       args._slotsAttemptedOut.perPrivCounts.push(args._slotsAttemptedOut.count);
     }
     if (candidate === null) continue;
+    // CEK-conflict defence-in-depth: this priv recovered different CEKs from two
+    // matching slots — an anomalous slot set. Surface it as the generic
+    // aead_pass_no_mac_match outcome (the trial-decrypt analogue of the unwrap
+    // TAMPERED_HEADER rejection: a CEK opened but the slot set is not trusted),
+    // never a clean match.
+    if (candidate.cekConflict) {
+      anyCandidateRecovered = true;
+      continue;
+    }
     const hmacKey = hkdfSha256({
       ikm: candidate.cek,
       salt: EMPTY_SALT,
       info: CARDANO_POE_HKDF_INFO_SLOTS_MAC,
       length: 32,
     });
-    const slotsMacCalc = hmac(sha256, hmacKey, slotsCbor);
+    const slotsMacCalc = hmac(sha256, hmacKey, slotsHash);
     if (compareCt(slotsMacCalc, envelope.slots_mac)) {
       return { kind: 'match', slotIdx: candidate.slotIdx, cek: candidate.cek };
     }

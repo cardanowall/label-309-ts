@@ -64,6 +64,24 @@ function deterministicPriv(seed: number): Uint8Array {
   return priv;
 }
 
+// A distinct low-order point to pair with `epk` so a two-slot envelope carries
+// DIFFERENT low-order epks per slot. Per-slot KEK uniqueness forbids two slots
+// sharing the same epk, so the regression scenarios use two distinct points;
+// both still drive the X25519 shared secret to all-zero, which is the property
+// under test.
+function otherLowOrderEpk(epk: Uint8Array): Uint8Array {
+  const epkHex = bytesToHex(epk);
+  const partner = LOW_ORDER_EPKS.find((e) => bytesToHex(e.epk) !== epkHex);
+  if (partner === undefined) throw new Error('no distinct low-order epk available');
+  return partner.epk;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 // A valid two-slot envelope, then replace ONE slot's epk with a low-order
 // point. Returns the recipient priv that legitimately matches the OTHER slot.
 function buildEnvelopeWithLowOrderSlot(lowOrderEpk: Uint8Array): {
@@ -86,7 +104,8 @@ function buildEnvelopeWithLowOrderSlot(lowOrderEpk: Uint8Array): {
   // Clobber the SECOND slot's epk with the low-order point. The first slot is
   // still a legitimate wrap for `recipientPriv`. Note this also invalidates the
   // slots_mac, so an unwrap that gets a CEK from slot 0 will report
-  // TAMPERED_HEADER — but crucially it must NOT throw.
+  // TAMPERED_HEADER — but crucially it must NOT throw. (Slot 0 keeps its honest
+  // epk, so the two slots' epks differ and per-slot KEK uniqueness holds.)
   const slots: X25519Slot[] = out.envelope.slots.map((s, i) =>
     i === 1 ? { epk: lowOrderEpk, wrap: s.wrap } : s,
   );
@@ -115,7 +134,14 @@ function buildAllLowOrderEnvelope(lowOrderEpk: Uint8Array): {
     skipShuffle: true,
   });
   if (out.envelope.kem !== 'x25519') throw new Error('expected x25519 envelope');
-  const slots: X25519Slot[] = out.envelope.slots.map((s) => ({ epk: lowOrderEpk, wrap: s.wrap }));
+  // Every slot carries a low-order epk, but the two slots use DISTINCT low-order
+  // points so per-slot KEK uniqueness holds — the property under test is that an
+  // all-zero shared secret per slot is a non-match, not a duplicate-epk reject.
+  const partnerEpk = otherLowOrderEpk(lowOrderEpk);
+  const slots: X25519Slot[] = out.envelope.slots.map((s, i) => ({
+    epk: i === 0 ? lowOrderEpk : partnerEpk,
+    wrap: s.wrap,
+  }));
   return { envelope: { ...out.envelope, slots }, ciphertext: out.ciphertext };
 }
 
