@@ -554,13 +554,23 @@ export interface AccountBalance {
 // POST /api/v1/records/{tx_hash}/verify
 // =============================================================================
 
+/**
+ * Request body for the hosted verify endpoint.
+ *
+ * The endpoint is a PUBLIC verifier — structural validation plus record-level
+ * signature verification over public chain data. It accepts no decryption
+ * credentials: a body carrying any is rejected with 400 validation-failed,
+ * and sealed (enc-bearing) items report as unverifiable without decryption.
+ * Recipient verification (sealed-envelope decrypt + plaintext-hash recheck)
+ * runs locally — use the `verifier` module's `decryption` input, which never
+ * leaves the process.
+ *
+ * `fetch_content` is the master content-fetch switch (item URIs and Merkle
+ * leaves lists alike). The server defaults it to `true`; pass `false` to skip
+ * content re-fetching — affected claims then report `not_checked`.
+ */
 export interface PoeVerifyInput {
-  readonly verify_uris?: boolean;
-  readonly decryption?: ReadonlyArray<{
-    readonly item_idx: number;
-    readonly recipient_secret_key?: string;
-    readonly passphrase?: string;
-  }>;
+  readonly fetch_content?: boolean;
 }
 
 // =============================================================================

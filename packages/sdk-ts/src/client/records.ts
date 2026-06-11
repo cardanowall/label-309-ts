@@ -123,8 +123,12 @@ export class RecordsNamespace {
    * between.
    *
    * Auth required (Bearer with `poe:read` scope, or NextAuth session
-   * cookie). Optional `verify_uris` toggles URI hash-equivalence checks;
-   * `decryption[]` drives trial-decrypt of sealed envelopes per item.
+   * cookie). This is the hosted PUBLIC verifier: it accepts no decryption
+   * credentials, and sealed items report as unverifiable without decryption.
+   * To verify as a recipient (decrypt + plaintext-hash recheck), run the
+   * `verifier` module locally with its `decryption` input — keys never leave
+   * the process. Optional `fetch_content: false` skips content re-fetching;
+   * affected claims report `not_checked`.
    */
   async verify(txHash: string, input?: PoeVerifyInput): Promise<VerifyReport> {
     const response = await this.config.fetch(

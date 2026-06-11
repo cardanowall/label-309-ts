@@ -638,6 +638,39 @@ describe('verifyTx — conformance profiles', () => {
     );
   });
 
+  it('public verifier (no credentials) never decrypts a sealed item nor fetches its ciphertext', async () => {
+    // The public-verifier role: even at the highest profile, an empty keyring
+    // means a sealed item's plaintext claim cannot be checked. The item must
+    // report not_checked WITHOUT a decryption entry, no ciphertext fetch may
+    // be issued, and the record's verdict is unaffected. Hosted verify
+    // endpoints (which accept no decryption credentials by contract) rely on
+    // exactly this branch.
+    const recipientSecret = makeSeed(61);
+    const recipientPub = x25519PublicKey({ secretKey: recipientSecret });
+    const plaintext = new TextEncoder().encode('public-verifier-no-keys');
+    const fix = buildFixture({ sealedItem: { plaintext, recipientPub } });
+    let storageCalls = 0;
+    const stub = mkStubFetch([
+      koiosStub(fix.txHash, fix.txCbor, 50),
+      (_u, o) => {
+        if (o.purpose === 'arweave' || o.purpose === 'ipfs') {
+          storageCalls += 1;
+          return bytesResponse(fix.ciphertext!);
+        }
+        return undefined;
+      },
+    ]);
+    const r = await verifyTx({
+      txHash: fix.txHash,
+      profile: 'recipient-sealed',
+      cardanoGatewayChain: [KOIOS_MAINNET],
+      fetchOutbound: stub,
+    });
+    expect(r.verdict).toBe('valid');
+    expect(r.items).toEqual([{ contentCheck: 'not_checked' }]);
+    expect(storageCalls).toBe(0);
+  });
+
   it("profile='signed' verifies sigs but never decrypts, even with credentials supplied", async () => {
     const recipientSecret = makeSeed(60);
     const recipientPub = x25519PublicKey({ secretKey: recipientSecret });

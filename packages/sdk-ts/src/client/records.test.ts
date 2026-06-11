@@ -252,7 +252,7 @@ describe('RecordsNamespace.verify', () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(verifyReportFixture()));
     const client = makeClient(fetchMock);
 
-    const out = await client.records.verify(TX_HASH, { verify_uris: true });
+    const out = await client.records.verify(TX_HASH, { fetch_content: false });
 
     // Response is parsed into the typed VerifyReport.
     expect(out.txHash).toBe(TX_HASH);
@@ -265,10 +265,13 @@ describe('RecordsNamespace.verify', () => {
     expect(url).toBe(`http://test.example/api/v1/records/${TX_HASH}/verify`);
     expect(String(url)).not.toContain('/api/v1/poe/');
     expect((init as RequestInit).method).toBe('POST');
-    // Body MUST contain the caller-supplied verify_uris flag — proves the
+    // Body MUST contain the caller-supplied fetch_content flag — proves the
     // body is round-tripped (not just an input mock-assert against itself).
+    // The endpoint is the hosted PUBLIC verifier: `fetch_content` is the ONLY
+    // accepted field, so this also pins that the client wire body carries no
+    // decryption credentials.
     const body = JSON.parse(String((init as RequestInit).body));
-    expect(body).toEqual({ verify_uris: true });
+    expect(body).toEqual({ fetch_content: false });
   });
 
   it('sends an empty JSON body when no input is provided', async () => {
