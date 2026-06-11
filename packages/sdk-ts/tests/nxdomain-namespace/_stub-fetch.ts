@@ -35,7 +35,7 @@ function bytesResponse(bytes: Uint8Array): FetchOutboundResult {
 
 export function stubFetchFromCorpusRecord(record: MainnetCorpusRecord): FetchOutbound {
   const captures = record.captured_gateway_responses;
-  const arweave = captures.arweave_envelope_responses ?? {};
+  const arweave = captures.arweave_responses ?? {};
 
   return async (url: string, _opts: FetchOutboundOptions): Promise<FetchOutboundResult> => {
     // Koios confirmation path.
@@ -58,7 +58,7 @@ export function stubFetchFromCorpusRecord(record: MainnetCorpusRecord): FetchOut
     if (url.includes('/txs/')) {
       return jsonResponse(captures.blockfrost_tx);
     }
-    // Sealed-item ciphertext (Arweave).
+    // Captured Arweave content (item bytes, leaves-lists, sealed ciphertext).
     for (const [arTxId, hex] of Object.entries(arweave)) {
       if (url === `https://arweave.net/${arTxId}`) {
         return bytesResponse(hexToBytes(hex));

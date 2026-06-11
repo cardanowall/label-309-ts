@@ -1,39 +1,33 @@
-// Fixture-consumption gates for the shared sealed-PoE conformance vectors at the
-// verifier layer. The passphrase path and the cross-path shape check both live
-// in the verifier, so the pinned vectors are driven through the public
-// `tryDecryptions` surface here:
+// Fixture-consumption gates for the shared sealed-PoE conformance vectors at
+// the verifier layer, driven through the public per-item decryption step:
 //
 //   * passphrase-n1.json — reproduce the producer path (Argon2id-derived CEK,
-//     HKDF payload_key, structured AAD, XChaCha20-Poly1305), assert the pinned
-//     ciphertext byte-for-byte, then round-trip the same ciphertext through the
-//     verifier.
+//     in-ciphertext key commitment, segmented STREAM), assert the pinned blob
+//     byte-for-byte, then round-trip the same blob through the verifier.
 //   * construction-negative.json (cross_path_vectors) — a slots-shaped record
 //     decrypted with a passphrase input, and a passphrase-shaped record
 //     decrypted with a recipient key, are both refused as
-//     WRONG_DECRYPTION_INPUT_SHAPE before any AEAD.
+//     WRONG_DECRYPTION_INPUT_SHAPE before any KDF or AEAD work.
 //
 // The corpus is the single source of truth shared across crypto-core, sdk-ts,
-// and sdk-py; it lives in crypto-core's tests/fixtures and is read from there so
-// a divergence fails cross-implementation rather than silently passing a
-// self-generated local copy.
+// and the sibling SDKs; it lives in crypto-core's tests/fixtures and is read
+// from there so a divergence fails cross-implementation rather than silently
+// passing a self-generated local copy.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { xchacha20Poly1305Encrypt } from '@cardanowall/crypto-core/aead';
-import { sha256 } from '@cardanowall/crypto-core/hash';
-import { argon2idV13 } from '@cardanowall/crypto-core/kdf';
-import { adContentPassphrase, passphrasePayloadKey } from '@cardanowall/crypto-core/sealed-poe';
-import type { ItemEntry, PoeRecord } from '@cardanowall/poe-standard';
+import { passphraseSealedPoeSeal } from '@cardanowall/crypto-core/sealed-poe';
+import type { ItemEntry } from '@cardanowall/poe-standard';
 import { describe, expect, it } from 'vitest';
 
-import { normalizePassphrase, tryDecryptions } from './decrypt';
-import type { FetchOutbound, HttpCallRecord, VerifyTxInput, VerifyUriCheck } from './types';
+import type { ContentFetchContext } from './content';
+import { decryptItem } from './decrypt';
+import { IssueSink } from './issues';
+import type { DecryptionCredential, FetchOutbound } from './types';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-// The sealed-PoE conformance corpus is shared across crypto-core, sdk-ts, and
-// sdk-py; it lives in crypto-core as the single source of truth.
 const fixturesDir = path.resolve(here, '../../../crypto-core/tests/fixtures/sealed-poe');
 
 function hexToBytes(hex: string): Uint8Array {
@@ -57,28 +51,30 @@ function loadFixture<T>(filename: string): T {
 }
 
 const NEVER_FETCH: FetchOutbound = async () => {
-  throw new Error('KAT must not fetch when ciphertextBytes are supplied');
+  throw new Error('KAT must not fetch when out-of-band ciphertext is supplied');
 };
 
-async function runDecrypt(
-  record: PoeRecord,
-  decryption: NonNullable<VerifyTxInput['decryption']>,
-  ciphertext: Uint8Array,
-): Promise<ReturnType<typeof tryDecryptions>> {
-  const httpCalls: HttpCallRecord[] = [];
-  const uriChecksOut: VerifyUriCheck[] = [];
-  const input: VerifyTxInput = {
-    txHash: 'a'.repeat(64),
-    decryption,
-    ciphertextBytes: { 0: ciphertext },
-  };
-  return tryDecryptions({
-    record,
-    input,
+function mkCtx(): ContentFetchContext {
+  return {
     fetchFn: NEVER_FETCH,
-    httpCalls,
-    uriChecksOut,
-    allowUriFetch: false,
+    arweaveGateways: ['https://arweave.example'],
+    ipfsGateways: [],
+    issues: new IssueSink(),
+  };
+}
+
+async function runDecrypt(
+  item: ItemEntry,
+  credentials: ReadonlyArray<DecryptionCredential>,
+  blob: Uint8Array,
+): Promise<ReturnType<typeof decryptItem>> {
+  return decryptItem({
+    item,
+    itemIndex: 0,
+    credentials,
+    outOfBandCiphertext: blob,
+    fetchContent: false,
+    ctx: mkCtx(),
   });
 }
 
@@ -93,54 +89,53 @@ interface PassphraseN1Corpus {
     salt_hex: string;
     params: { m: number; t: number; p: number };
     nonce_hex: string;
+    hashes: Record<string, string>;
     plaintext_hex: string;
+    expected_commitment_hex: string;
     expected_ciphertext_hex: string;
     expected_plaintext_hex: string;
   };
 }
 
 describe('sealed-poe passphrase path — pinned conformance vector', () => {
-  it('byte-pins the ciphertext from the producer path and round-trips through the verifier', async () => {
+  it('byte-pins the blob from the producer path and round-trips through the verifier', async () => {
     const { vector } = loadFixture<PassphraseN1Corpus>('passphrase-n1.json');
-    const { passphrase } = vector;
     const salt = hexToBytes(vector.salt_hex);
-    const { m, t, p } = vector.params;
     const nonce = hexToBytes(vector.nonce_hex);
     const plaintext = hexToBytes(vector.plaintext_hex);
+    const hashes = Object.fromEntries(
+      Object.entries(vector.hashes).map(([alg, hex]) => [alg, hexToBytes(hex)]),
+    );
 
-    // Producer recompute: CEK = Argon2id(normalize(pw)); payload_key = HKDF(CEK,
-    // salt=nonce, info=payload-passphrase); AAD = canonicalEncode(AD_CONTENT_PASSPHRASE).
-    const cek = await argon2idV13({
-      password: normalizePassphrase(passphrase),
+    // Producer recompute: commitment(32) || STREAM chunks, pinned byte-exact.
+    const sealed = await passphraseSealedPoeSeal({
+      plaintext,
+      hashes,
+      passphrase: vector.passphrase,
       salt,
-      memSizeKB: m,
-      iterations: t,
-      parallelism: p,
-      outBytes: 32,
-    });
-    const payloadKey = passphrasePayloadKey({ cek, nonce });
-    const aad = adContentPassphrase({
+      params: vector.params,
       nonce,
-      passphrase: { alg: 'argon2id', salt, params: { m, t, p } },
     });
-    const ciphertext = xchacha20Poly1305Encrypt({ key: payloadKey, nonce, aad, plaintext });
-    expect(bytesToHex(ciphertext)).toBe(vector.expected_ciphertext_hex);
+    expect(bytesToHex(sealed.blob.subarray(0, 32))).toBe(vector.expected_commitment_hex);
+    expect(bytesToHex(sealed.blob)).toBe(vector.expected_ciphertext_hex);
 
-    // Round-trip the pinned ciphertext through the public verifier.
+    // Round-trip the pinned blob through the public verifier step.
     const item = {
-      hashes: { 'sha2-256': sha256(plaintext) },
+      hashes,
       enc: {
         scheme: 1,
-        aead: 'xchacha20-poly1305',
+        aead: sealed.envelope.aead,
         nonce,
-        passphrase: { alg: 'argon2id', salt, params: { m, t, p } },
+        passphrase: { alg: 'argon2id', salt, params: vector.params },
       },
     } as unknown as ItemEntry;
-    const record = { v: 1, items: [item] } as unknown as PoeRecord;
-
-    const { results } = await runDecrypt(record, [{ itemIndex: 0, passphrase }], ciphertext);
-    expect(results[0]?.verdict).toBe('decrypted');
-    expect(results[0]?.plaintext_hash_ok).toBe(true);
+    const result = await runDecrypt(
+      item,
+      [{ passphrase: vector.passphrase }],
+      hexToBytes(vector.expected_ciphertext_hex),
+    );
+    expect(result.contentCheck).toBe('checked');
+    expect(result.decryption).toEqual({ decrypted: true, plaintextHashOk: true });
     expect(bytesToHex(plaintext)).toBe(vector.expected_plaintext_hex);
   });
 });
@@ -200,15 +195,13 @@ describe('sealed-poe cross-path confusion — pinned conformance vectors', () =>
           slots_mac: hexToBytes(env.slots_mac_hex),
         },
       } as unknown as ItemEntry;
-      const record = { v: 1, items: [item] } as unknown as PoeRecord;
 
-      const { results } = await runDecrypt(
-        record,
-        [{ itemIndex: 0, passphrase: 'anything' }],
-        new Uint8Array(16),
-      );
-      expect(results[0]?.verdict).toBe('wrong-input-shape');
-      expect(results[0]?.reason).toBe('WRONG_DECRYPTION_INPUT_SHAPE');
+      const result = await runDecrypt(item, [{ passphrase: 'anything' }], new Uint8Array(16));
+      expect(result.contentCheck).toBe('not_checked');
+      expect(result.decryption).toEqual({
+        decrypted: false,
+        code: 'WRONG_DECRYPTION_INPUT_SHAPE',
+      });
     });
 
     it(`a passphrase-shaped record + recipient key is refused before any AEAD: ${v.name}`, async () => {
@@ -226,15 +219,17 @@ describe('sealed-poe cross-path confusion — pinned conformance vectors', () =>
           },
         },
       } as unknown as ItemEntry;
-      const record = { v: 1, items: [item] } as unknown as PoeRecord;
 
-      const { results } = await runDecrypt(
-        record,
-        [{ itemIndex: 0, recipientSecretKey: new Uint8Array(32).fill(0x11) }],
+      const result = await runDecrypt(
+        item,
+        [{ recipientSecretKey: new Uint8Array(32).fill(0x11) }],
         new Uint8Array(16),
       );
-      expect(results[0]?.verdict).toBe('wrong-input-shape');
-      expect(results[0]?.reason).toBe('WRONG_DECRYPTION_INPUT_SHAPE');
+      expect(result.contentCheck).toBe('not_checked');
+      expect(result.decryption).toEqual({
+        decrypted: false,
+        code: 'WRONG_DECRYPTION_INPUT_SHAPE',
+      });
     });
   }
 });

@@ -102,8 +102,8 @@ describe('PoeNamespace.publishContent — hash-only happy path', () => {
     };
     expect(body.quote_id).toBe(QUOTE_ID);
     const validated = validatePoeRecord(hexToBytes(body.record));
-    expect(validated.ok).toBe(true);
-    if (!validated.ok) throw new Error('unreachable');
+    expect(validated.valid).toBe(true);
+    if (!validated.valid) throw new Error('unreachable');
     const record = validated.record;
     expect(record.v).toBe(1);
     expect(record.items).toHaveLength(1);
@@ -123,8 +123,8 @@ describe('PoeNamespace.publishContent — hash-only happy path', () => {
       record: string;
     };
     const validated = validatePoeRecord(hexToBytes(body.record));
-    expect(validated.ok).toBe(true);
-    if (!validated.ok) throw new Error('unreachable');
+    expect(validated.valid).toBe(true);
+    if (!validated.valid) throw new Error('unreachable');
     expect(validated.record.sigs).toBeUndefined();
   });
 
@@ -144,8 +144,8 @@ describe('PoeNamespace.publishContent — hash-only happy path', () => {
       record: string;
     };
     const validated = validatePoeRecord(hexToBytes(body.record));
-    expect(validated.ok).toBe(true);
-    if (!validated.ok) throw new Error('unreachable');
+    expect(validated.valid).toBe(true);
+    if (!validated.valid) throw new Error('unreachable');
     expect(validated.record.items![0]!.hashes).toHaveProperty('blake2b-256');
     expect(validated.record.items![0]!.hashes).not.toHaveProperty('sha2-256');
   });
@@ -217,12 +217,12 @@ describe('PoeNamespace.publishSealed — encrypt + uploads + publish', () => {
       record: string;
     };
     const validated = validatePoeRecord(hexToBytes(body.record));
-    expect(validated.ok).toBe(true);
-    if (!validated.ok) throw new Error('unreachable');
+    expect(validated.valid).toBe(true);
+    if (!validated.valid) throw new Error('unreachable');
     const item = validated.record.items![0]!;
     expect(item.enc).toBeDefined();
     expect(item.uris).toBeDefined();
-    expect(item.uris![0]!.join('')).toBe(arUri);
+    expect(item.uris![0]!).toBe(arUri);
     expect(validated.record.sigs).toHaveLength(1);
 
     // End-to-end: decrypt the ciphertext we captured with the recipient secret.
@@ -230,13 +230,14 @@ describe('PoeNamespace.publishSealed — encrypt + uploads + publish', () => {
     const unwrapped = eciesSealedPoeUnwrap({
       envelope: {
         scheme: envelope['scheme'] as 1,
-        aead: envelope['aead'] as 'xchacha20-poly1305',
+        aead: envelope['aead'] as 'chacha20-poly1305-stream64k',
         kem: envelope['kem'] as 'x25519',
         nonce: envelope['nonce'] as Uint8Array,
         slots: envelope['slots'] as ReadonlyArray<{ epk: Uint8Array; wrap: Uint8Array }>,
         slots_mac: envelope['slots_mac'] as Uint8Array,
       },
       ciphertext: capturedCiphertext!,
+      hashes: item.hashes,
       recipientSecretKey: recipientSecret,
     });
     expect(unwrapped.matched).toBe(true);
@@ -273,26 +274,28 @@ describe('PoeNamespace.publishSealed — encrypt + uploads + publish', () => {
       record: string;
     };
     const validated = validatePoeRecord(hexToBytes(body.record));
-    expect(validated.ok).toBe(true);
-    if (!validated.ok) throw new Error('unreachable');
+    expect(validated.valid).toBe(true);
+    if (!validated.valid) throw new Error('unreachable');
     const item = validated.record.items![0]!;
     const envelope = item.enc! as unknown as Record<string, unknown>;
     expect(envelope['kem']).toBe('mlkem768x25519');
-    // Hybrid slots carry chunked kem_ct, never a per-slot epk.
+    // Hybrid slots carry the single 1120-byte kem_ct, never a per-slot epk.
     const slots = envelope['slots'] as ReadonlyArray<{ kem_ct?: unknown; epk?: unknown }>;
-    expect(slots[0]!.kem_ct).toBeDefined();
+    expect(slots[0]!.kem_ct).toBeInstanceOf(Uint8Array);
+    expect((slots[0]!.kem_ct as Uint8Array).length).toBe(1120);
     expect(slots[0]!.epk).toBeUndefined();
 
     const unwrapped = eciesSealedPoeUnwrap({
       envelope: {
         scheme: envelope['scheme'] as 1,
-        aead: envelope['aead'] as 'xchacha20-poly1305',
+        aead: envelope['aead'] as 'chacha20-poly1305-stream64k',
         kem: 'mlkem768x25519',
         nonce: envelope['nonce'] as Uint8Array,
-        slots: envelope['slots'] as ReadonlyArray<{ kem_ct: Uint8Array[]; wrap: Uint8Array }>,
+        slots: envelope['slots'] as ReadonlyArray<{ kem_ct: Uint8Array; wrap: Uint8Array }>,
         slots_mac: envelope['slots_mac'] as Uint8Array,
       },
       ciphertext: capturedCiphertext!,
+      hashes: item.hashes,
       recipientSecretKey: secretSeed,
     });
     expect(unwrapped.matched).toBe(true);
@@ -394,8 +397,8 @@ describe('PoeNamespace.publishMerkle — Merkle batch via uploads + publish', ()
       record: string;
     };
     const validated = validatePoeRecord(hexToBytes(body.record));
-    expect(validated.ok).toBe(true);
-    if (!validated.ok) throw new Error('unreachable');
+    expect(validated.valid).toBe(true);
+    if (!validated.valid) throw new Error('unreachable');
     expect(validated.record.merkle).toHaveLength(1);
     expect(validated.record.merkle![0]!.leaf_count).toBe(4);
     expect(bytesToHex(validated.record.merkle![0]!.root)).toBe(bytesToHex(expectedRoot));
@@ -500,8 +503,8 @@ describe('PoeNamespace.publishPrehashed — caller-supplied digest', () => {
     };
     expect(body.quote_id).toBe(QUOTE_ID);
     const validated = validatePoeRecord(hexToBytes(body.record));
-    expect(validated.ok).toBe(true);
-    if (!validated.ok) throw new Error('unreachable');
+    expect(validated.valid).toBe(true);
+    if (!validated.valid) throw new Error('unreachable');
     expect(bytesToHex(validated.record.items![0]!.hashes['sha2-256']!)).toBe(digestHex);
   });
 

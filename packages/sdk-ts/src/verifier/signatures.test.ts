@@ -22,6 +22,7 @@ import {
   type PoeRecord,
 } from '@cardanowall/poe-standard';
 
+import { IssueSink } from './issues';
 import { verifyRecordSignatures } from './signatures';
 
 const MAINNET_STAKE_NETWORK_BYTE = 0xe1;
@@ -34,15 +35,6 @@ function makeSeed(byte: number): Uint8Array {
 
 function bytesToHex(b: Uint8Array): string {
   return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-}
-
-function chunkBytes(value: Uint8Array, size = 64): Uint8Array[] {
-  if (value.length === 0) return [new Uint8Array(0)];
-  const out: Uint8Array[] = [];
-  for (let i = 0; i < value.length; i += size) {
-    out.push(value.subarray(i, Math.min(i + size, value.length)));
-  }
-  return out;
 }
 
 function buildEd25519CoseKey(pub: Uint8Array): Uint8Array {
@@ -87,7 +79,7 @@ function buildPath1Record(opts: { seed?: Uint8Array; tamper?: boolean } = {}): B
   return {
     record: {
       ...recordBase,
-      sigs: [{ cose_sign1: chunkBytes(cose) }],
+      sigs: [{ cose_sign1: cose }],
     } as PoeRecord,
     pub,
   };
@@ -134,40 +126,42 @@ function buildPath2Record(
   return {
     record: {
       ...recordBase,
-      sigs: [{ cose_sign1: chunkBytes(cose), cose_key: chunkBytes(coseKey) }],
+      sigs: [{ cose_sign1: cose, cose_key: coseKey }],
     } as PoeRecord,
     pub,
   };
 }
 
 describe('verifyRecordSignatures — path 1 (in-signature kid)', () => {
-  it('happy path: 32-byte protected kid → verdict valid', async () => {
+  it('happy path: 32-byte protected kid → verdict valid', () => {
     const built = buildPath1Record();
-    const out = await verifyRecordSignatures({
+    const out = verifyRecordSignatures({
       record: built.record,
-      input: { txHash: '0'.repeat(64) },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out).toEqual([
       {
         index: 0,
         verdict: 'valid',
-        signer_type: 'in-signature-kid',
-        signer_pub: bytesToHex(built.pub),
+        signerType: 'in-signature-kid',
+        signerPub: bytesToHex(built.pub),
       },
     ]);
   });
 
-  it('tampered signature byte → verdict invalid, reason SIGNATURE_INVALID', async () => {
+  it('tampered signature byte → verdict invalid, reason SIGNATURE_INVALID', () => {
     const built = buildPath1Record({ tamper: true });
-    const out = await verifyRecordSignatures({
+    const out = verifyRecordSignatures({
       record: built.record,
-      input: { txHash: '0'.repeat(64) },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out[0]!.verdict).toBe('invalid');
     expect(out[0]!.reason).toBe('SIGNATURE_INVALID');
   });
 
-  it('attached payload → MALFORMED_SIG_COSE_SIGN1', async () => {
+  it('attached payload → MALFORMED_SIG_COSE_SIGN1', () => {
     // Build a COSE_Sign1 with an ATTACHED (non-null) payload. Label 309 mandates
     // a detached payload, so the verifier must reject this as malformed.
     const seed = makeSeed(30);
@@ -197,11 +191,12 @@ describe('verifyRecordSignatures — path 1 (in-signature kid)', () => {
     });
     const record = {
       ...recordBase,
-      sigs: [{ cose_sign1: chunkBytes(cose) }],
+      sigs: [{ cose_sign1: cose }],
     } as PoeRecord;
-    const out = await verifyRecordSignatures({
+    const out = verifyRecordSignatures({
       record,
-      input: { txHash: '0'.repeat(64) },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out[0]!.verdict).toBe('invalid');
     expect(out[0]!.reason).toBe('MALFORMED_SIG_COSE_SIGN1');
@@ -209,32 +204,35 @@ describe('verifyRecordSignatures — path 1 (in-signature kid)', () => {
 });
 
 describe('verifyRecordSignatures — path 2 (wallet inline cose_key)', () => {
-  it('correct address binding → verdict valid', async () => {
+  it('correct address binding → verdict valid', () => {
     const built = buildPath2Record();
-    const out = await verifyRecordSignatures({
+    const out = verifyRecordSignatures({
       record: built.record,
-      input: { txHash: '0'.repeat(64), cardanoNetwork: 'mainnet' },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out[0]!.verdict).toBe('valid');
-    expect(out[0]!.signer_type).toBe('wallet-inline-key');
-    expect(out[0]!.signer_pub).toBe(bytesToHex(built.pub));
+    expect(out[0]!.signerType).toBe('wallet-inline-key');
+    expect(out[0]!.signerPub).toBe(bytesToHex(built.pub));
   });
 
-  it('mismatched address bytes → WALLET_ADDRESS_MISMATCH', async () => {
+  it('mismatched address bytes → WALLET_ADDRESS_MISMATCH', () => {
     const built = buildPath2Record({ badAddress: true });
-    const out = await verifyRecordSignatures({
+    const out = verifyRecordSignatures({
       record: built.record,
-      input: { txHash: '0'.repeat(64), cardanoNetwork: 'mainnet' },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out[0]!.verdict).toBe('invalid');
     expect(out[0]!.reason).toBe('WALLET_ADDRESS_MISMATCH');
   });
 
-  it('wrong network header → WALLET_ADDRESS_MISMATCH', async () => {
+  it('wrong network header → WALLET_ADDRESS_MISMATCH', () => {
     const built = buildPath2Record({ mainnetAddress: false });
-    const out = await verifyRecordSignatures({
+    const out = verifyRecordSignatures({
       record: built.record,
-      input: { txHash: '0'.repeat(64), cardanoNetwork: 'mainnet' },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out[0]!.verdict).toBe('invalid');
     expect(out[0]!.reason).toBe('WALLET_ADDRESS_MISMATCH');

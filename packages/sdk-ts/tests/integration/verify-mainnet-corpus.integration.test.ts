@@ -27,12 +27,16 @@ const FIXTURES_DIR = fileURLToPath(new URL('../fixtures/verify-reports/', import
 
 const corpus = MainnetCorpusSchema.parse(JSON.parse(readFileSync(CORPUS_PATH, 'utf8')));
 
-const CONFORMANCE_DENY = ['cardanowall.com', '*.cardanowall.com', 'localhost', '127.0.0.1'];
+const CONFORMANCE_DENY = ['operator.example', '*.operator.example', 'localhost', '127.0.0.1'];
 
+// Sort keys by UTF-16 code unit, matching the golden writer and Python's
+// `json.dumps(sort_keys=True)` exactly (never locale-sensitive).
 function sortedKeys(_key: string, value: unknown): unknown {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)),
+      Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      ),
     );
   }
   return value;
@@ -42,12 +46,12 @@ function canonicalJson(d: Record<string, unknown>): string {
   return JSON.stringify(d, sortedKeys, 2) + '\n';
 }
 
-function isCardanoWallHost(url: string): boolean {
+function isDeniedOperatorHost(url: string): boolean {
   const h = new URL(url).hostname
     .toLowerCase()
     .replace(/^\[|\]$/g, '')
     .replace(/\.$/, '');
-  return h === 'cardanowall.com' || h.endsWith('.cardanowall.com');
+  return h === 'operator.example' || h.endsWith('.operator.example');
 }
 
 // Replay the verifier against one corpus record exactly as the golden writer
@@ -65,8 +69,8 @@ async function verifyCorpusRecord(
   record: MainnetCorpusRecord,
 ): Promise<Awaited<ReturnType<typeof verifyTx>>> {
   const useBlockfrost = record.provider === 'blockfrost';
+  // The keyring is global to the run; per-item pairing is the verifier's job.
   const decryption = (record.recipient_secret_keys ?? []).map((r) => ({
-    itemIndex: r.item_index,
     recipientSecretKey: hexToBytes(r.secret_key),
   }));
   return verifyTx({
@@ -86,20 +90,37 @@ describe('verify-mainnet-corpus integration', () => {
     expect(corpus.records.length).toBeGreaterThanOrEqual(100);
   });
 
-  // Sanity: the realistic surfaces (signed, sealed, tx-level description) MUST
-  // be present in the corpus, otherwise the cross-impl parity goldens would
-  // never exercise the renamed report fields.
+  // Sanity: the realistic surfaces (signed, sealed, fetched content, Merkle,
+  // tx-level description) MUST be present in the corpus, otherwise the
+  // cross-impl parity goldens would never exercise those report fields.
   it('corpus exercises the realistic report surfaces', () => {
-    const fixtures = corpus.records.map((r) =>
-      JSON.parse(readFileSync(`${FIXTURES_DIR}${r.tx_hash}.json`, 'utf8')),
+    interface GoldenShape {
+      readonly signatures?: ReadonlyArray<unknown>;
+      readonly items?: ReadonlyArray<{
+        readonly contentCheck: string;
+        readonly decryption?: { readonly decrypted?: boolean };
+      }>;
+      readonly merkle?: ReadonlyArray<{ readonly contentCheck: string }>;
+      readonly txWitnesses?: ReadonlyArray<unknown>;
+      readonly txSummary?: { readonly fee_lovelace?: string };
+      readonly metadataLabels?: ReadonlyArray<number>;
+    }
+    const fixtures: GoldenShape[] = corpus.records.map(
+      (r) => JSON.parse(readFileSync(`${FIXTURES_DIR}${r.tx_hash}.json`, 'utf8')) as GoldenShape,
     );
-    expect(fixtures.some((f) => Array.isArray(f.record_signatures))).toBe(true);
-    expect(fixtures.some((f) => Array.isArray(f.item_decryptions))).toBe(true);
-    expect(fixtures.some((f) => Array.isArray(f.tx_witnesses) && f.tx_witnesses.length > 0)).toBe(
+    expect(fixtures.some((f) => Array.isArray(f.signatures) && f.signatures.length > 0)).toBe(true);
+    expect(fixtures.some((f) => f.items?.some((item) => item.decryption?.decrypted === true))).toBe(
       true,
     );
-    expect(fixtures.some((f) => f.tx_summary?.fee_lovelace !== undefined)).toBe(true);
-    expect(fixtures.every((f) => Array.isArray(f.metadata_labels))).toBe(true);
+    expect(fixtures.some((f) => f.items?.some((item) => item.contentCheck === 'checked'))).toBe(
+      true,
+    );
+    expect(fixtures.some((f) => f.merkle?.some((m) => m.contentCheck === 'checked'))).toBe(true);
+    expect(fixtures.some((f) => Array.isArray(f.txWitnesses) && f.txWitnesses.length > 0)).toBe(
+      true,
+    );
+    expect(fixtures.some((f) => f.txSummary?.fee_lovelace !== undefined)).toBe(true);
+    expect(fixtures.every((f) => Array.isArray(f.metadataLabels))).toBe(true);
   });
 
   describe.each(corpus.records.map((r) => [r.tx_hash, r] as const))(
@@ -111,7 +132,7 @@ describe('verify-mainnet-corpus integration', () => {
         const expected = readFileSync(`${FIXTURES_DIR}${txHash}.json`, 'utf8');
         expect(actual).toBe(expected);
         expect(result.verdict).toBe(record.expected_verdict);
-        expect(result.http_calls.every((c) => !isCardanoWallHost(c.url))).toBe(true);
+        expect(result.auditTrail.every((c) => !isDeniedOperatorHost(c.url))).toBe(true);
       });
     },
   );

@@ -45,15 +45,17 @@ export type FetchOutbound = (
   opts: FetchOutboundOptions,
 ) => Promise<FetchOutboundResult>;
 
-// Audit-log entry for one outbound HTTP fetch. Field names are snake_case so
-// the record can land directly on `VerifyReport.http_calls[]` (which IS the
-// wire shape) without a key-renaming pass.
+// Audit-log entry for one outbound HTTP fetch. The field set and names match
+// the verifier report's audit-trail entry exactly, so the record lands on
+// `VerifyReport.auditTrail[]` without a key-renaming pass. `status` is the
+// HTTP status when a response was received and `null` when none was (refused
+// call, transport failure).
 export interface HttpCallRecord {
   readonly url: string;
   readonly method: HttpMethod;
-  readonly status: number;
+  readonly status: number | null;
   readonly bytes: number;
-  readonly duration_ms: number;
+  readonly durationMs: number;
   readonly purpose: HttpPurpose;
 }
 
@@ -77,6 +79,33 @@ export class DenyHostError extends Error {
     this.host = host;
     this.url = url;
   }
+}
+
+// The typed errors discriminate on their stable `code` property, never on
+// class identity: the package ships several entry points in two module
+// formats, so a consumer's `BodyTooLargeError` (thrown by a custom transport
+// that imported it from another entry) is a different class object than the
+// verifier's. `instanceof` is kept as the fast path for the common
+// same-module case.
+
+/** Whether `e` is a deny-host refusal (`SERVICE_INDEPENDENCE_VIOLATION`). */
+export function isDenyHostError(e: unknown): e is DenyHostError {
+  return (
+    e instanceof DenyHostError ||
+    (typeof e === 'object' &&
+      e !== null &&
+      (e as { code?: unknown }).code === 'SERVICE_INDEPENDENCE_VIOLATION')
+  );
+}
+
+/** Whether `e` is a body-cap abort (`OUTBOUND_BODY_TOO_LARGE`). */
+export function isBodyTooLargeError(e: unknown): e is BodyTooLargeError {
+  return (
+    e instanceof BodyTooLargeError ||
+    (typeof e === 'object' &&
+      e !== null &&
+      (e as { code?: unknown }).code === 'OUTBOUND_BODY_TOO_LARGE')
+  );
 }
 
 export class UnsupportedProtocolError extends Error {
@@ -206,12 +235,27 @@ export const defaultFetchOutbound: FetchOutbound = async (url, opts) => {
   const init: RequestInit = {
     method: opts.method,
     signal: controller.signal,
+    // Redirects are never followed — deny-host and protocol validation ran
+    // against the original URL only, so a 3xx from an allowed host could
+    // otherwise pivot the fetch to any target (e.g. `302 Location:
+    // http://127.0.0.1/…`) behind the verifier's back. Every target must be
+    // validated, so a redirect is a fetch failure; all SDKs behave
+    // identically. A readable 3xx flows through as a non-2xx status and the
+    // caller's attempt handling marks it failed, like a 5xx.
+    redirect: 'manual',
   };
   if (opts.headers) init.headers = { ...opts.headers };
   if (opts.body !== undefined) init.body = opts.body;
   try {
     // allow-raw-fetch: canonical defaultFetchOutbound — single egress point
     const res = await fetch(url, init);
+
+    // Browser runtimes surface a refused redirect as an opaque response
+    // (type 'opaqueredirect', status 0) with no readable status or body;
+    // there is nothing to report from it, so it fails like a transport error.
+    if (res.type === 'opaqueredirect') {
+      throw new Error(`redirect refused (opaqueredirect): ${url} answered with a redirect`);
+    }
 
     // Fast path: a truthful Content-Length over the cap lets us bail before
     // reading a single body byte. A lying/absent header is still caught by the
@@ -309,9 +353,9 @@ export function wrapFetchOutbound(
       audit.push({
         url,
         method: 'GET',
-        status: 0,
+        status: null,
         bytes: 0,
-        duration_ms: 0,
+        durationMs: 0,
         purpose: opts.purpose,
       });
       throw new Error(
@@ -325,9 +369,9 @@ export function wrapFetchOutbound(
       audit.push({
         url,
         method: 'GET',
-        status: 0,
+        status: null,
         bytes: 0,
-        duration_ms: 0,
+        durationMs: 0,
         purpose: opts.purpose,
       });
       throw new UnsupportedProtocolError(protocol ?? '', url);
@@ -338,9 +382,9 @@ export function wrapFetchOutbound(
       audit.push({
         url,
         method: 'GET',
-        status: 0,
+        status: null,
         bytes: 0,
-        duration_ms: 0,
+        durationMs: 0,
         purpose: opts.purpose,
       });
       throw new UnsupportedMethodError(opts.method, url);
@@ -353,9 +397,9 @@ export function wrapFetchOutbound(
         audit.push({
           url,
           method: opts.method,
-          status: 0,
+          status: null,
           bytes: 0,
-          duration_ms: 0,
+          durationMs: 0,
           purpose: opts.purpose,
         });
         throw new DenyHostError(canonicaliseHost(host), url);
@@ -375,7 +419,7 @@ export function wrapFetchOutbound(
           method: opts.method,
           status: result.status,
           bytes: result.bytes.byteLength,
-          duration_ms: result.durationMs,
+          durationMs: result.durationMs,
           purpose: opts.purpose,
         });
         if (retryableStatuses.includes(result.status) && retries > 0) {
@@ -397,9 +441,9 @@ export function wrapFetchOutbound(
           audit.push({
             url,
             method: opts.method,
-            status: 0,
+            status: null,
             bytes: 0,
-            duration_ms: durationMs,
+            durationMs,
             purpose: opts.purpose,
           });
           throw e;
@@ -407,9 +451,9 @@ export function wrapFetchOutbound(
         audit.push({
           url,
           method: opts.method,
-          status: 0,
+          status: null,
           bytes: 0,
-          duration_ms: durationMs,
+          durationMs,
           purpose: opts.purpose,
         });
         lastError = e as Error;

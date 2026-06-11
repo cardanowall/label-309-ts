@@ -16,6 +16,7 @@
 // failure. This test pins that contract: the primitive returns a no-match
 // result and never throws.
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import { describe, expect, it } from 'vitest';
 
 import { x25519PublicKey } from '../kem/x25519';
@@ -27,6 +28,7 @@ import {
   type UnwrapResult,
 } from './unwrap';
 import { eciesSealedPoeWrap, type SealedEnvelope, type X25519Slot } from './wrap';
+import type { ItemHashes } from './transcript';
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
@@ -87,6 +89,7 @@ function bytesToHex(bytes: Uint8Array): string {
 function buildEnvelopeWithLowOrderSlot(lowOrderEpk: Uint8Array): {
   envelope: SealedEnvelope;
   ciphertext: Uint8Array;
+  hashes: ItemHashes;
   matchingPriv: Uint8Array;
   nonMatchingPriv: Uint8Array;
 } {
@@ -97,8 +100,9 @@ function buildEnvelopeWithLowOrderSlot(lowOrderEpk: Uint8Array): {
     x25519PublicKey({ secretKey: otherPriv }),
   ];
   const plaintext = new TextEncoder().encode('low-order-epk-regression');
+  const hashes: ItemHashes = { 'sha2-256': sha256(plaintext) };
   // skipShuffle keeps slot order deterministic so we know which slot to clobber.
-  const out = eciesSealedPoeWrap({ plaintext, recipientPublicKeys, skipShuffle: true });
+  const out = eciesSealedPoeWrap({ plaintext, hashes, recipientPublicKeys, skipShuffle: true });
   if (out.envelope.kem !== 'x25519') throw new Error('expected x25519 envelope');
 
   // Clobber the SECOND slot's epk with the low-order point. The first slot is
@@ -113,6 +117,7 @@ function buildEnvelopeWithLowOrderSlot(lowOrderEpk: Uint8Array): {
   return {
     envelope,
     ciphertext: out.ciphertext,
+    hashes,
     matchingPriv: recipientPriv,
     nonMatchingPriv: deterministicPriv(0xa0),
   };
@@ -123,13 +128,17 @@ function buildEnvelopeWithLowOrderSlot(lowOrderEpk: Uint8Array): {
 function buildAllLowOrderEnvelope(lowOrderEpk: Uint8Array): {
   envelope: SealedEnvelope;
   ciphertext: Uint8Array;
+  hashes: ItemHashes;
 } {
+  const plaintext = new TextEncoder().encode('all-low-order');
+  const hashes: ItemHashes = { 'sha2-256': sha256(plaintext) };
   const recipientPublicKeys = [
     x25519PublicKey({ secretKey: deterministicPriv(0x11) }),
     x25519PublicKey({ secretKey: deterministicPriv(0x55) }),
   ];
   const out = eciesSealedPoeWrap({
-    plaintext: new TextEncoder().encode('all-low-order'),
+    plaintext,
+    hashes,
     recipientPublicKeys,
     skipShuffle: true,
   });
@@ -142,19 +151,20 @@ function buildAllLowOrderEnvelope(lowOrderEpk: Uint8Array): {
     epk: i === 0 ? lowOrderEpk : partnerEpk,
     wrap: s.wrap,
   }));
-  return { envelope: { ...out.envelope, slots }, ciphertext: out.ciphertext };
+  return { envelope: { ...out.envelope, slots }, ciphertext: out.ciphertext, hashes };
 }
 
 describe('sealed-poe unwrap — low-order epk slot is a non-match, never a throw', () => {
   for (const { name, epk } of LOW_ORDER_EPKS) {
     describe(`epk = ${name}`, () => {
       it('eciesSealedPoeUnwrap (single-priv, non-matching priv) returns matched=false', () => {
-        const { envelope, ciphertext } = buildAllLowOrderEnvelope(epk);
+        const { envelope, ciphertext, hashes } = buildAllLowOrderEnvelope(epk);
         let result: UnwrapResult | undefined;
         expect(() => {
           result = eciesSealedPoeUnwrap({
             envelope,
             ciphertext,
+            hashes,
             recipientSecretKey: deterministicPriv(0x99),
           });
         }).not.toThrow();
@@ -162,28 +172,30 @@ describe('sealed-poe unwrap — low-order epk slot is a non-match, never a throw
       });
 
       it('eciesSealedPoeUnwrap (multi-priv) returns matched=false with all low-order slots', () => {
-        const { envelope, ciphertext } = buildAllLowOrderEnvelope(epk);
+        const { envelope, ciphertext, hashes } = buildAllLowOrderEnvelope(epk);
         let result: UnwrapResult | undefined;
         expect(() => {
           result = eciesSealedPoeUnwrap({
             envelope,
             ciphertext,
+            hashes,
             recipientSecretKeys: [deterministicPriv(0x99), deterministicPriv(0xcd)],
           });
         }).not.toThrow();
         expect(result?.matched).toBe(false);
       });
 
-      it('eciesSealedPoeTrialDecrypt does not throw and reports no_aead_pass', () => {
-        const { envelope } = buildAllLowOrderEnvelope(epk);
+      it('eciesSealedPoeTrialDecrypt does not throw and reports no_match', () => {
+        const { envelope, hashes } = buildAllLowOrderEnvelope(epk);
         let result: TrialDecryptOnlyResult | undefined;
         expect(() => {
           result = eciesSealedPoeTrialDecrypt({
             envelope,
+            hashes,
             recipientSecretKeys: [deterministicPriv(0x99)],
           });
         }).not.toThrow();
-        expect(result?.kind).toBe('no_aead_pass');
+        expect(result?.kind).toBe('no_match');
       });
 
       it('a legitimate slot still opens even when a sibling slot has a low-order epk', () => {
@@ -192,12 +204,13 @@ describe('sealed-poe unwrap — low-order epk slot is a non-match, never a throw
         // The recovered CEK opens slot 0, but slots_mac no longer matches the
         // clobbered slot set, so the verdict is TAMPERED_HEADER — the point is
         // that we get a structured verdict instead of an exception.
-        const { envelope, ciphertext, matchingPriv } = buildEnvelopeWithLowOrderSlot(epk);
+        const { envelope, ciphertext, hashes, matchingPriv } = buildEnvelopeWithLowOrderSlot(epk);
         let result: UnwrapResult | undefined;
         expect(() => {
           result = eciesSealedPoeUnwrap({
             envelope,
             ciphertext,
+            hashes,
             recipientSecretKey: matchingPriv,
           });
         }).not.toThrow();
@@ -207,16 +220,16 @@ describe('sealed-poe unwrap — low-order epk slot is a non-match, never a throw
         }
       });
 
-      it('constant-time-N still enters every slot when a low-order epk follows the match', () => {
-        // With constantTimeN=true (default) the loop must enter all slots even
-        // after recovering a CEK, and a low-order epk in a trailing slot must
-        // not turn that into a throw.
-        const { envelope, ciphertext, matchingPriv } = buildEnvelopeWithLowOrderSlot(epk);
+      it('the constant-across-slots scan still enters every slot when a low-order epk follows the match', () => {
+        // The loop must enter all slots even after recovering a CEK, and a
+        // low-order epk in a trailing slot must not turn that into a throw.
+        const { envelope, ciphertext, hashes, matchingPriv } = buildEnvelopeWithLowOrderSlot(epk);
         const slotsAttemptedOut = { count: 0 };
         expect(() => {
           eciesSealedPoeUnwrap({
             envelope,
             ciphertext,
+            hashes,
             recipientSecretKey: matchingPriv,
             _slotsAttemptedOut: slotsAttemptedOut,
           });

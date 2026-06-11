@@ -14,6 +14,7 @@
 
 import { bytesToHex } from '../hex';
 import { readJson, throwIfNotOk } from './http-helpers';
+import { PartialUploadError } from './partial-upload-error';
 import {
   publishContent as publishContentImpl,
   publishMerkle as publishMerkleImpl,
@@ -21,6 +22,7 @@ import {
   publishSealed as publishSealedImpl,
   type ResolvedPublishConfig,
 } from './publish';
+import { uploadResumable as uploadResumableImpl, type SingleShotUpload } from './resumable-upload';
 import type {
   FetchImpl,
   PublishBatchInput,
@@ -34,6 +36,9 @@ import type {
   PublishSealedInput,
   QuoteInput,
   QuoteResponse,
+  UploadResumableInput,
+  UploadResumableResult,
+  UploadSuccessEntry,
   UploadsInput,
   UploadsResponse,
 } from './types';
@@ -149,6 +154,67 @@ export class PoeNamespace {
     await throwIfNotOk(response);
     return (await readJson(response)) as UploadsResponse;
   }
+
+  /**
+   * Upload a single file of any size, choosing the ingress path by size.
+   *
+   * A file at or below `threshold` (default ~48 MiB) is sent with the unchanged
+   * single-shot `uploads()` multipart call. A larger file is uploaded as a
+   * resumable, content-addressed session: the helper streams the whole-file
+   * SHA-256 once (never buffering a multi-GB file), creates a session, PUTs each
+   * chunk (several in parallel, retrying a failed chunk), then completes —
+   * polling the shared attempt endpoint when completion is accepted
+   * asynchronously. Both paths converge on one `ar://` URI.
+   *
+   * The chunk size is the server's authoritative `chunk_bytes` from the create
+   * response, clamped to its `max_chunk_bytes` ceiling; the client's `chunkBytes`
+   * is only a request. A create-time dedup hit returns the existing URI without
+   * uploading; a `402` funding error is surfaced as a typed error.
+   *
+   * The `source` works in both runtimes: a `Blob`/`File` in the browser, a
+   * `Uint8Array`, a filesystem path string, or a pre-adapted `ResumableSource`
+   * on the server. To resume an interrupted upload, pass the prior `sessionId`;
+   * the helper GETs its status and uploads only the missing chunks.
+   */
+  async uploadResumable(input: UploadResumableInput): Promise<UploadResumableResult> {
+    return uploadResumableImpl(this.config, this.singleShotUpload, input);
+  }
+
+  /**
+   * Upload exactly one blob via the single-shot multipart route and resolve its
+   * `ar://` URI. Backs the small-file branch of `uploadResumable`; it shares the
+   * `uploads()` wire shape but takes one blob and an optional abort signal, and
+   * surfaces a per-file failure as a `PartialUploadError` (the resumable helper
+   * promises a single resolved URI, unlike the raw `uploads()` passthrough).
+   */
+  private readonly singleShotUpload: SingleShotUpload = async ({
+    target,
+    bytes,
+    idempotencyKey,
+    signal,
+  }) => {
+    const form = new FormData();
+    form.append('target', target);
+    form.append(
+      'file_0',
+      new Blob([bytes as unknown as ArrayBuffer], { type: 'application/octet-stream' }),
+      'file_0.bin',
+    );
+    const response = await this.config.fetch(`${this.config.baseUrl}/api/v1/poe/uploads`, {
+      method: 'POST',
+      headers: buildMultipartHeaders({ apiKey: this.config.apiKey, idempotencyKey }),
+      body: form,
+      ...(signal ? { signal } : {}),
+    });
+    await throwIfNotOk(response);
+    const result = (await readJson(response)) as UploadsResponse;
+    const entry = result.uploads[0];
+    if (entry === undefined || entry.ok === false) {
+      throw new PartialUploadError(result);
+    }
+    const ok = entry as UploadSuccessEntry;
+    return { uri: ok.uri, sha256: ok.sha256, bytes: ok.bytes };
+  };
 
   /**
    * Submit a single finalised canonical-CBOR record to Cardano. Caller is

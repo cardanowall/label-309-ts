@@ -2,25 +2,38 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import { describe, expect, it } from 'vitest';
 
 import { x25519PublicKey } from '../kem/x25519';
 
 import { EciesSealedPoeError, type EciesSealedPoeErrorCode } from './errors';
-import { eciesSealedPoeUnwrap, type UnwrapFailureReason } from './unwrap';
-import { eciesSealedPoeWrap, type SealedEnvelope, type X25519Slot } from './wrap';
+import { eciesSealedPoeTrialDecrypt, eciesSealedPoeUnwrap } from './unwrap';
+import type { UnwrapFailureReason } from './unwrap';
+import {
+  eciesSealedPoeWrap,
+  SEALED_POE_AEAD,
+  type Mlkem768X25519Slot,
+  type SealedEnvelope,
+  type X25519Slot,
+} from './wrap';
+import type { ItemHashes } from './transcript';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(here, '../../tests/fixtures/sealed-poe');
 
+// A fixture slot carries `epk_hex` on the classical path and a single flat
+// `kem_ct_hex` on the hybrid path; the loader routes on field presence exactly
+// like the reference generator.
 interface SlotHex {
-  epk_hex: string;
+  epk_hex?: string;
+  kem_ct_hex?: string;
   wrap_hex: string;
 }
 
 interface EnvelopeHex {
   scheme: 1 | number;
-  aead: 'xchacha20-poly1305' | string;
+  aead: string;
   kem: 'x25519' | string;
   nonce_hex: string;
   slots: SlotHex[];
@@ -30,6 +43,7 @@ interface EnvelopeHex {
 interface UnwrapPositiveVector {
   name: string;
   recipient_secrets_hex: string[];
+  hashes: Record<string, string>;
   envelope: EnvelopeHex;
   ciphertext_hex: string;
   expected_plaintext_hex: string;
@@ -45,6 +59,7 @@ interface UnwrapPositiveCorpus {
 interface MatchedFalseVector {
   name: string;
   envelope: EnvelopeHex;
+  hashes: Record<string, string>;
   ciphertext_hex: string;
   recipient_secret_hex: string;
   expected_reason: UnwrapFailureReason;
@@ -53,6 +68,7 @@ interface MatchedFalseVector {
 interface RaiseVector {
   name: string;
   envelope: EnvelopeHex;
+  hashes: Record<string, string>;
   ciphertext_hex: string;
   recipient_secret_hex: string;
   expected_error_code: EciesSealedPoeErrorCode;
@@ -82,6 +98,10 @@ function bytesToHex(bytes: Uint8Array): string {
     .join('');
 }
 
+function hashesFromHex(hashes: Record<string, string>): ItemHashes {
+  return Object.fromEntries(Object.entries(hashes).map(([alg, hex]) => [alg, hexToBytes(hex)]));
+}
+
 function loadPositive(filename: string): UnwrapPositiveCorpus {
   return JSON.parse(
     fs.readFileSync(path.join(fixturesDir, filename), 'utf8'),
@@ -95,13 +115,27 @@ function loadNegative(filename: string): UnwrapNegativeCorpus {
 }
 
 function envelopeFromHex(env: EnvelopeHex): SealedEnvelope {
+  if (env.kem === 'mlkem768x25519') {
+    const slots: Mlkem768X25519Slot[] = env.slots.map((s) => ({
+      kem_ct: hexToBytes(s.kem_ct_hex ?? ''),
+      wrap: hexToBytes(s.wrap_hex),
+    }));
+    return {
+      scheme: env.scheme as 1,
+      aead: env.aead as typeof SEALED_POE_AEAD,
+      kem: 'mlkem768x25519',
+      nonce: hexToBytes(env.nonce_hex),
+      slots,
+      slots_mac: hexToBytes(env.slots_mac_hex),
+    };
+  }
   const slots: X25519Slot[] = env.slots.map((s) => ({
-    epk: hexToBytes(s.epk_hex),
+    epk: hexToBytes(s.epk_hex ?? ''),
     wrap: hexToBytes(s.wrap_hex),
   }));
   return {
     scheme: env.scheme as 1,
-    aead: env.aead as 'xchacha20-poly1305',
+    aead: env.aead as typeof SEALED_POE_AEAD,
     kem: env.kem as 'x25519',
     nonce: hexToBytes(env.nonce_hex),
     slots,
@@ -113,10 +147,12 @@ function checkPositive(corpus: UnwrapPositiveCorpus): void {
   const { vector } = corpus;
   const envelope = envelopeFromHex(vector.envelope);
   const ciphertext = hexToBytes(vector.ciphertext_hex);
+  const hashes = hashesFromHex(vector.hashes);
   for (const privHex of vector.recipient_secrets_hex) {
     const result = eciesSealedPoeUnwrap({
       envelope,
       ciphertext,
+      hashes,
       recipientSecretKey: hexToBytes(privHex),
     });
     expect(result.matched).toBe(true);
@@ -144,6 +180,32 @@ describe('sealed-poe unwrap — N=32 recipients', () => {
   });
 });
 
+describe('sealed-poe unwrap — shadow slot before the honest slot (pinned vector)', () => {
+  // Slot 0 wrap-opens under the recipient's key with an attacker-chosen CEK,
+  // but that CEK does not reproduce slots_mac, so the per-slot acceptance fold
+  // (kem_ok AND wrap_open_ok AND mac_ok) skips it and the honest slot 1 wins.
+  // Accepting a slot on wrap-open success alone is non-conformant.
+  interface ShadowSlotCorpus extends UnwrapPositiveCorpus {
+    vector: UnwrapPositiveVector & { expected_matched_slot_idx: number };
+  }
+
+  it('decrypts under the honest CEK and selects the honest slot index', () => {
+    const corpus = loadPositive('unwrap-shadow-slot.json') as ShadowSlotCorpus;
+    checkPositive(corpus);
+
+    const { vector } = corpus;
+    const trial = eciesSealedPoeTrialDecrypt({
+      envelope: envelopeFromHex(vector.envelope),
+      hashes: hashesFromHex(vector.hashes),
+      recipientSecretKeys: vector.recipient_secrets_hex.map(hexToBytes),
+    });
+    expect(trial.kind).toBe('match');
+    if (trial.kind === 'match') {
+      expect(trial.slotIdx).toBe(vector.expected_matched_slot_idx);
+    }
+  });
+});
+
 describe('sealed-poe unwrap — structured negative results', () => {
   const negative = loadNegative('unwrap-negative.json');
   // The multi-priv MAC-fail vector lives in the same fixture but
@@ -154,11 +216,10 @@ describe('sealed-poe unwrap — structured negative results', () => {
   );
   for (const v of singlePrivMatchedFalse) {
     it(`returns matched=false reason=${v.expected_reason} for ${v.name}`, () => {
-      const envelope = envelopeFromHex(v.envelope);
-      const ciphertext = hexToBytes(v.ciphertext_hex);
       const result = eciesSealedPoeUnwrap({
-        envelope,
-        ciphertext,
+        envelope: envelopeFromHex(v.envelope),
+        ciphertext: hexToBytes(v.ciphertext_hex),
+        hashes: hashesFromHex(v.hashes),
         recipientSecretKey: hexToBytes(v.recipient_secret_hex),
       });
       expect(result.matched).toBe(false);
@@ -181,12 +242,11 @@ describe('sealed-poe unwrap — input-validation EciesSealedPoeError codes', () 
   );
   for (const v of singlePrivRaises) {
     it(`raises code=${v.expected_error_code} for ${v.name}`, () => {
-      const envelope = envelopeFromHex(v.envelope);
-      const ciphertext = hexToBytes(v.ciphertext_hex);
       try {
         eciesSealedPoeUnwrap({
-          envelope,
-          ciphertext,
+          envelope: envelopeFromHex(v.envelope),
+          ciphertext: hexToBytes(v.ciphertext_hex),
+          hashes: hashesFromHex(v.hashes),
           recipientSecretKey: hexToBytes(v.recipient_secret_hex),
         });
         throw new Error(`${v.name}: expected EciesSealedPoeError, got success`);
@@ -213,11 +273,13 @@ describe('sealed-poe unwrap — property: wrap then unwrap roundtrip N ∈ {1,3,
         x25519PublicKey({ secretKey: priv }),
       );
       const plaintext = new TextEncoder().encode(`unwrap-property-N${String(n)}`);
-      const out = eciesSealedPoeWrap({ plaintext, recipientPublicKeys });
+      const hashes: ItemHashes = { 'sha2-256': sha256(plaintext) };
+      const out = eciesSealedPoeWrap({ plaintext, hashes, recipientPublicKeys });
       for (const priv of recipientPrivs) {
         const res = eciesSealedPoeUnwrap({
           envelope: out.envelope,
           ciphertext: out.ciphertext,
+          hashes,
           recipientSecretKey: priv,
         });
         expect(res.matched).toBe(true);
@@ -229,47 +291,27 @@ describe('sealed-poe unwrap — property: wrap then unwrap roundtrip N ∈ {1,3,
   });
 });
 
-describe('sealed-poe unwrap — constant-time-N iteration count', () => {
+describe('sealed-poe unwrap — constant-across-slots iteration count', () => {
   const positive = loadPositive('unwrap-n32.json');
-  const envelope = envelopeFromHex(positive.vector.envelope);
-  const ciphertext = hexToBytes(positive.vector.ciphertext_hex);
-  const privs = positive.vector.recipient_secrets_hex.map(hexToBytes);
 
-  it('enters all 32 slots regardless of match position in constantTimeN=true (default)', () => {
-    // Test against three positions: 0, 15, 31 — different slots that should all open in N=32 fixture.
+  it('enters all 32 slots regardless of match position', () => {
+    const envelope = envelopeFromHex(positive.vector.envelope);
+    const ciphertext = hexToBytes(positive.vector.ciphertext_hex);
+    const hashes = hashesFromHex(positive.vector.hashes);
+    const privs = positive.vector.recipient_secrets_hex.map(hexToBytes);
+    // Test against three positions: 0, 15, 31 — different slots that should
+    // all open in the N=32 fixture.
     for (const idx of [0, 15, 31]) {
       const slotsAttemptedOut = { count: 0 };
       const res = eciesSealedPoeUnwrap({
         envelope,
         ciphertext,
+        hashes,
         recipientSecretKey: privs[idx]!,
         _slotsAttemptedOut: slotsAttemptedOut,
       });
       expect(res.matched).toBe(true);
       expect(slotsAttemptedOut.count).toBe(envelope.slots.length);
     }
-  });
-
-  it('short-circuits at matchedSlotIdx+1 when constantTimeN=false', () => {
-    // Three privs map to three distinct slot positions in the shuffled N=32 envelope,
-    // so at least one priv must match at a slot < N-1 — proving short-circuit fires
-    // (count strictly less than constant-time-N count of N).
-    const n = envelope.slots.length;
-    const variableCounts: number[] = [];
-    for (const idx of [0, 15, 31]) {
-      const slotsAttemptedOut = { count: 0 };
-      const res = eciesSealedPoeUnwrap({
-        envelope,
-        ciphertext,
-        recipientSecretKey: privs[idx]!,
-        constantTimeN: false,
-        _slotsAttemptedOut: slotsAttemptedOut,
-      });
-      expect(res.matched).toBe(true);
-      expect(slotsAttemptedOut.count).toBeGreaterThanOrEqual(1);
-      expect(slotsAttemptedOut.count).toBeLessThanOrEqual(n);
-      variableCounts.push(slotsAttemptedOut.count);
-    }
-    expect(Math.min(...variableCounts)).toBeLessThan(n);
   });
 });

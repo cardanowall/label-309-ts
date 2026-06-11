@@ -69,16 +69,18 @@ function recordFixture(overrides: Partial<RecordResource> = {}): RecordResource 
 // emits and the server returns verbatim.
 function verifyReportFixture(overrides: Partial<VerifyReport> = {}): VerifyReport {
   return {
-    tx_hash: TX_HASH,
+    txHash: TX_HASH,
     network: 'cardano:mainnet',
     verdict: 'valid',
-    exit_code: 0,
+    exitCode: 0,
     profile: 'core',
-    num_confirmations: 100,
-    confirmation_depth_threshold: 12,
-    metadata_present: true,
-    validation: { valid: true },
-    http_calls: [],
+    confirmationDepth: 100,
+    confirmationThreshold: 12,
+    block_time: 1767225600,
+    issues: [],
+    items: [{ contentCheck: 'not_checked' }],
+    merkle: [],
+    auditTrail: [],
     ...overrides,
   };
 }
@@ -253,10 +255,10 @@ describe('RecordsNamespace.verify', () => {
     const out = await client.records.verify(TX_HASH, { verify_uris: true });
 
     // Response is parsed into the typed VerifyReport.
-    expect(out.tx_hash).toBe(TX_HASH);
+    expect(out.txHash).toBe(TX_HASH);
     expect(out.verdict).toBe('valid');
-    expect(out.exit_code).toBe(0);
-    expect(out.validation.valid).toBe(true);
+    expect(out.exitCode).toBe(0);
+    expect(out.issues).toEqual([]);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;

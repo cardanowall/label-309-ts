@@ -5,6 +5,7 @@ export default defineConfig({
     index: 'src/index.ts',
     schema: 'src/schema.ts',
     encoder: 'src/encoder.ts',
+    carriage: 'src/carriage.ts',
     validator: 'src/validator.ts',
     'error-codes': 'src/error-codes.ts',
   },

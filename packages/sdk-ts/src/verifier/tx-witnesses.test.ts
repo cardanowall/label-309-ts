@@ -7,12 +7,11 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { decodeCbor } from '@cardanowall/crypto-core/cbor';
 import { blake2b256 } from '@cardanowall/crypto-core/hash';
 
-import { sliceLabel309Value, sliceTxComponents } from './cbor-walker';
-import { decodeTxSummary, decodeTxWitnesses } from './tx-witnesses';
 import { bytesToHex } from '../hex';
+import { sliceTxComponents, unwrapAuxiliaryData } from './cbor-walker';
+import { decodeTxSummary, decodeTxWitnesses } from './tx-witnesses';
 
 // Confirmed Conway-era transaction CBOR. `blake2b256(txBody)` of the sliced
 // body equals the on-chain transaction hash asserted below.
@@ -73,23 +72,22 @@ describe('sliceTxComponents — byte-faithful tx body slice', () => {
     expect(bytesToHex(blake2b256(txBody))).toBe(EXPECTED_TX_HASH);
   });
 
-  it('collects every aux metadata label, sorted ascending', () => {
-    const { auxMetadataLabels } = sliceTxComponents(TX);
-    expect(auxMetadataLabels).toEqual([309]);
+  it('collects every aux metadata label, sorted ascending, and finds the label-309 value', () => {
+    const { auxiliaryData } = sliceTxComponents(TX);
+    expect(auxiliaryData).not.toBeNull();
+    const unwrapped = unwrapAuxiliaryData(auxiliaryData!);
+    expect(unwrapped.metadataLabels).toEqual([309]);
+    expect(unwrapped.label309).not.toBeNull();
   });
 
-  it('leaves sliceLabel309Value byte-identical (a Label 309 record map)', () => {
-    const fromHelper = sliceLabel309Value(TX);
-    const { label309 } = sliceTxComponents(TX);
-    expect(fromHelper).not.toBeNull();
-    // sliceLabel309Value must keep returning exactly the bytes
-    // sliceTxComponents finds — the refactor cannot change its output.
-    expect(label309).not.toBeNull();
-    expect(Array.from(label309!)).toEqual(Array.from(fromHelper!));
-    // The reassembled value decodes as a Label 309 record: { "v": 1, … }.
-    const record = decodeCbor(label309!) as Record<string, unknown>;
-    expect(record['v']).toBe(1);
-    expect('items' in record).toBe(true);
+  it('the auxiliary-data slice satisfies the body-committed auxiliary_data_hash', () => {
+    const { txBody, auxiliaryData } = sliceTxComponents(TX);
+    // Body key 7 commits to the auxiliary-data bytes exactly as carried; the
+    // recomputed hash over the slice must equal it.
+    expect(auxiliaryData).not.toBeNull();
+    const bodyHex = bytesToHex(txBody);
+    const committedHex = bytesToHex(blake2b256(auxiliaryData!));
+    expect(bodyHex.includes(committedHex)).toBe(true);
   });
 });
 

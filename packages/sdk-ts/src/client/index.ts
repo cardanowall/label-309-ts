@@ -6,6 +6,13 @@ export { PoeNamespace } from './poe';
 export { RecordsNamespace } from './records';
 export { PublishError } from './publish';
 export { PartialUploadError } from './partial-upload-error';
+export {
+  ResumableUploadError,
+  DEFAULT_RESUMABLE_THRESHOLD_BYTES,
+  DEFAULT_RESUMABLE_CHUNK_BYTES,
+} from './resumable-upload';
+export { toResumableSource } from './resumable-source';
+export type { ResumableSource, ResumableSourceInput } from './resumable-source';
 
 export {
   Label309HttpError,
@@ -68,8 +75,25 @@ export type {
   Signer,
   StorageTarget,
   SupportedHashAlg,
+  UploadAttemptCommitted,
+  UploadAttemptReleased,
+  UploadAttemptReleaseReason,
+  UploadAttemptReserved,
+  UploadAttemptState,
+  UploadAttemptStatus,
   UploadEntry,
   UploadFailureEntry,
+  UploadResumableInput,
+  UploadResumableResult,
+  UploadSessionAcceptedResponse,
+  UploadSessionChunkResponse,
+  UploadSessionCompletedResponse,
+  UploadSessionCompleteResponse,
+  UploadSessionCreateRequest,
+  UploadSessionCreateResponse,
+  UploadSessionDeduplicatedResponse,
+  UploadSessionState,
+  UploadSessionStatus,
   UploadSuccessEntry,
   UploadsInput,
   UploadsResponse,

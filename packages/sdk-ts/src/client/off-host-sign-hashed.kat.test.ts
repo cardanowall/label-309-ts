@@ -26,6 +26,7 @@ import { signEd25519 } from '@cardanowall/crypto-core/sig';
 import type { PoeRecord, SigEntry } from '@cardanowall/poe-standard';
 import { describe, expect, it } from 'vitest';
 
+import { IssueSink } from '../verifier/issues';
 import { verifyRecordSignatures } from '../verifier/signatures';
 
 import {
@@ -61,7 +62,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const fixturePath = path.resolve(here, '../../tests/fixtures/cose/sign1-build.json');
+const fixturePath = path.resolve(here, '../../../crypto-core/tests/fixtures/cose/sign1-build.json');
 const corpus = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as Sign1BuildCorpus;
 
 const EMPTY_BYTES = new Uint8Array(0);
@@ -126,24 +127,25 @@ describe.each(corpus.cardano_poe_vectors)(
       expect(bytesToHex(sigNonHashed)).toBe(vector.expected_signature_hex);
     });
 
-    it('round-trips through verifyRecordSignatures with verdict=valid', async () => {
+    it('round-trips through verifyRecordSignatures with verdict=valid', () => {
       const { sigStructureBytes } = prepareSigStructureHashed({ record, signerPubkey });
       const signature = signEd25519({ seed, message: sigStructureBytes });
       const { sigEntry } = assembleCoseSign1Hashed({ record, signerPubkey, signature });
       const completedRecord: PoeRecord = { ...record, sigs: [sigEntry] };
-      const out = await verifyRecordSignatures({
+      const out = verifyRecordSignatures({
         record: completedRecord,
-        input: { txHash: '0'.repeat(64), cardanoNetwork: 'mainnet' },
+        cardanoNetwork: 'mainnet',
+        issues: new IssueSink(),
       });
       expect(out[0]).toMatchObject({
         index: 0,
         verdict: 'valid',
-        signer_type: 'in-signature-kid',
-        signer_pub: vector.signer_public_key_hex,
+        signerType: 'in-signature-kid',
+        signerPub: vector.signer_public_key_hex,
       });
     });
 
-    it('negative — "hashed": true with non-hashed signature fails verification', async () => {
+    it('negative — "hashed": true with non-hashed signature fails verification', () => {
       // Attacker: builds COSE_Sign1 with unprotected `"hashed": true` but
       // signs over the NON-hashed Sig_structure. Verifier substitutes
       // `Blake2b-224(to_sign)` in Sig_structure[3] before strict Ed25519 →
@@ -161,16 +163,17 @@ describe.each(corpus.cardano_poe_vectors)(
         payload: null,
         signature: sigNonHashed,
       });
-      const tamperedEntry = { cose_sign1: [tamperedCose] } as unknown as SigEntry;
-      const out = await verifyRecordSignatures({
+      const tamperedEntry = { cose_sign1: tamperedCose } as unknown as SigEntry;
+      const out = verifyRecordSignatures({
         record: { ...record, sigs: [tamperedEntry] } as PoeRecord,
-        input: { txHash: '0'.repeat(64), cardanoNetwork: 'mainnet' },
+        cardanoNetwork: 'mainnet',
+        issues: new IssueSink(),
       });
       expect(out[0]?.verdict).toBe('invalid');
       expect(out[0]?.reason).toBe('SIGNATURE_INVALID');
     });
 
-    it('negative — hashed signature with "hashed" flag removed fails verification', async () => {
+    it('negative — hashed signature with "hashed" flag removed fails verification', () => {
       // Defender flow: a HASHED-MODE-built signature; attacker strips the
       // unprotected `"hashed": true` flag. Verifier sees no flag → skips
       // hash substitution → verifies over the unhashed Sig_structure →
@@ -187,10 +190,11 @@ describe.each(corpus.cardano_poe_vectors)(
         payload: null,
         signature: sigHashed,
       });
-      const strippedEntry = { cose_sign1: [flagStrippedCose] } as unknown as SigEntry;
-      const out = await verifyRecordSignatures({
+      const strippedEntry = { cose_sign1: flagStrippedCose } as unknown as SigEntry;
+      const out = verifyRecordSignatures({
         record: { ...record, sigs: [strippedEntry] } as PoeRecord,
-        input: { txHash: '0'.repeat(64), cardanoNetwork: 'mainnet' },
+        cardanoNetwork: 'mainnet',
+        issues: new IssueSink(),
       });
       expect(out[0]?.verdict).toBe('invalid');
       expect(out[0]?.reason).toBe('SIGNATURE_INVALID');

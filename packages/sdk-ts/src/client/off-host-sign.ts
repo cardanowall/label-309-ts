@@ -13,7 +13,9 @@
 //   - Path-1 `kid-as-public-key` convention: 32-byte raw Ed25519 pubkey in
 //     protected header label 4; path-1 / path-2 are mutually exclusive on
 //     the wire.
-//   - chunked-bytes-array: per-chunk size in [1, 64].
+//   - `sigs[i].cose_sign1` is a SINGLE byte string carrying the whole
+//     COSE_Sign1; the only chunking in the format is the whole-body
+//     transport array under metadata label 309.
 //
 // Use cases (the four integration shapes this surface is intended for):
 //   1. AWS KMS `Sign` over the returned Sig_structure bytes — wrap KMS as
@@ -55,9 +57,7 @@ import {
 } from '@cardanowall/crypto-core/cose';
 import { blake2b224 } from '@cardanowall/crypto-core/hash';
 import {
-  chunkBytes,
   encodeRecordBodyForSigning,
-  type ChunkedBytesArray,
   type PoeRecord,
   type SigEntry,
 } from '@cardanowall/poe-standard';
@@ -65,6 +65,14 @@ import {
 const EMPTY_BYTES = new Uint8Array(0);
 const ED25519_PUBLIC_KEY_LENGTH = 32;
 const ED25519_SIGNATURE_LENGTH = 64;
+
+// Copy into a freshly allocated buffer so the emitted `sigs[i]` entry owns its
+// bytes (and satisfies the schema's `Uint8Array<ArrayBuffer>` requirement).
+function cloneToOwnedBuffer(src: Uint8Array): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(new ArrayBuffer(src.length));
+  out.set(src);
+  return out;
+}
 
 export type OffHostSignErrorCode = 'INVALID_PUBKEY_LENGTH' | 'INVALID_SIGNATURE_LENGTH';
 
@@ -149,9 +157,9 @@ export function prepareSigStructure(args: PrepareSigStructureArgs): PrepareSigSt
 }
 
 // Assembles `COSE_Sign1 = [ protected_bytes, unprotected_map, null, signature ]`
-// (detached payload, `alg = -8`, protected `kid = signerPubkey`), chunks the
-// result into the Label 309 chunked-bytes-array shape, and emits a path-1-only
-// `{cose_sign1}` `sigs[i]` entry.
+// (detached payload, `alg = -8`, protected `kid = signerPubkey`) and emits a
+// path-1-only `{cose_sign1}` `sigs[i]` entry carrying the whole blob as one
+// byte string.
 export function assembleCoseSign1(args: AssembleCoseSign1Args): AssembleCoseSign1Result {
   if (args.signerPubkey.length !== ED25519_PUBLIC_KEY_LENGTH) {
     throw new OffHostSignError(
@@ -172,8 +180,7 @@ export function assembleCoseSign1(args: AssembleCoseSign1Args): AssembleCoseSign
     payload: null,
     signature: args.signature,
   });
-  const chunks = chunkBytes(coseSign1Bytes) as ChunkedBytesArray;
-  const sigEntry: SigEntry = { cose_sign1: chunks };
+  const sigEntry: SigEntry = { cose_sign1: cloneToOwnedBuffer(coseSign1Bytes) };
   return { coseSign1Bytes, sigEntry };
 }
 
@@ -230,7 +237,6 @@ export function assembleCoseSign1Hashed(args: AssembleCoseSign1Args): AssembleCo
     payload: null,
     signature: args.signature,
   });
-  const chunks = chunkBytes(coseSign1Bytes) as ChunkedBytesArray;
-  const sigEntry: SigEntry = { cose_sign1: chunks };
+  const sigEntry: SigEntry = { cose_sign1: cloneToOwnedBuffer(coseSign1Bytes) };
   return { coseSign1Bytes, sigEntry };
 }

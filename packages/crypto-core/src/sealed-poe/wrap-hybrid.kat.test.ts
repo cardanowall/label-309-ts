@@ -1,10 +1,10 @@
 // KAT for the hybrid (mlkem768x25519 / X-Wing) sealed-PoE branch.
 //
 // Wraps deterministically against pinned recipient X-Wing keypairs, per-slot
-// eseeds, CEK, and nonce, asserting byte-equality of the produced kem_ct (flat
-// 1120-byte enc), wrap, slots_mac, and content ciphertext. Then unwraps each
-// recipient secret seed and recovers the CEK + plaintext, proving the
-// round-trip and that slots_mac commits to the chunked kem_ct.
+// eseeds, CEK, and nonce, asserting byte-equality of the produced kem_ct
+// (single 1120-byte byte string), wrap, slots_mac, and content ciphertext.
+// Then unwraps each recipient secret seed and recovers the CEK + plaintext,
+// proving the round-trip and that slots_mac commits to the kem_ct.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,9 +14,9 @@ import { describe, expect, it } from 'vitest';
 
 import { mlkem768x25519Keygen } from '../kem/mlkem768x25519';
 
-import { joinKemCt } from './slots-codec';
 import { eciesSealedPoeUnwrap } from './unwrap';
-import { eciesSealedPoeWrap, type Mlkem768X25519Slot } from './wrap';
+import { eciesSealedPoeWrap, SEALED_POE_AEAD, type Mlkem768X25519Slot } from './wrap';
+import type { ItemHashes } from './transcript';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(here, '../../tests/fixtures/sealed-poe');
@@ -34,6 +34,7 @@ interface HybridVector {
   cek_hex: string;
   nonce_hex: string;
   plaintext_hex: string;
+  hashes: Record<string, string>;
   expected_slots: HybridSlotHex[];
   expected_slots_mac_hex: string;
   expected_ciphertext_hex: string;
@@ -67,6 +68,10 @@ function loadHybrid(filename: string): HybridCorpus {
   return JSON.parse(fs.readFileSync(path.join(fixturesDir, filename), 'utf8')) as HybridCorpus;
 }
 
+function hashesFromHex(hashes: Record<string, string>): ItemHashes {
+  return Object.fromEntries(Object.entries(hashes).map(([alg, hex]) => [alg, hexToBytes(hex)]));
+}
+
 function checkHybridWrap(corpus: HybridCorpus): void {
   const { vector } = corpus;
   // Pinned keypair check: the recorded publics MUST re-derive from the seeds,
@@ -80,8 +85,10 @@ function checkHybridWrap(corpus: HybridCorpus): void {
     expect(bytesToHex(recipientPublicKeys[i]!)).toBe(vector.recipient_publics_hex[i]);
   }
 
+  const hashes = hashesFromHex(vector.hashes);
   const out = eciesSealedPoeWrap({
     plaintext: hexToBytes(vector.plaintext_hex),
+    hashes,
     recipientPublicKeys,
     kem: 'mlkem768x25519',
     cek: hexToBytes(vector.cek_hex),
@@ -91,7 +98,7 @@ function checkHybridWrap(corpus: HybridCorpus): void {
   });
 
   expect(out.envelope.scheme).toBe(1);
-  expect(out.envelope.aead).toBe('xchacha20-poly1305');
+  expect(out.envelope.aead).toBe(SEALED_POE_AEAD);
   expect(out.envelope.kem).toBe('mlkem768x25519');
   if (out.envelope.kem !== 'mlkem768x25519') throw new Error('expected hybrid envelope');
   const slots: ReadonlyArray<Mlkem768X25519Slot> = out.envelope.slots;
@@ -101,16 +108,10 @@ function checkHybridWrap(corpus: HybridCorpus): void {
   for (let i = 0; i < vector.expected_slots.length; i++) {
     const slot = slots[i]!;
     const expected = vector.expected_slots[i]!;
-    // Reassembled enc MUST be exactly 1120 bytes and match the pinned vector.
-    const enc = joinKemCt(slot.kem_ct);
-    expect(enc.length).toBe(1120);
-    expect(bytesToHex(enc)).toBe(expected.kem_ct_hex);
+    // kem_ct MUST be a single byte string of exactly 1120 bytes.
+    expect(slot.kem_ct.length).toBe(1120);
+    expect(bytesToHex(slot.kem_ct)).toBe(expected.kem_ct_hex);
     expect(bytesToHex(slot.wrap)).toBe(expected.wrap_hex);
-    // Each chunk MUST be <= 64 bytes (Cardano metadatum bstr cap).
-    for (const chunk of slot.kem_ct) {
-      expect(chunk.length).toBeGreaterThanOrEqual(1);
-      expect(chunk.length).toBeLessThanOrEqual(64);
-    }
   }
   expect(bytesToHex(out.envelope.slots_mac)).toBe(vector.expected_slots_mac_hex);
   expect(bytesToHex(out.ciphertext)).toBe(vector.expected_ciphertext_hex);
@@ -121,6 +122,7 @@ function checkHybridWrap(corpus: HybridCorpus): void {
     const res = eciesSealedPoeUnwrap({
       envelope: out.envelope,
       ciphertext: out.ciphertext,
+      hashes,
       recipientSecretKey: kp.secretSeed,
     });
     expect(res.matched).toBe(true);

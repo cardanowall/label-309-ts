@@ -6,7 +6,8 @@ import { describe, expect, it } from 'vitest';
 
 import { EciesSealedPoeError } from './errors';
 import { eciesSealedPoeUnwrap, type UnwrapFailureReason } from './unwrap';
-import { type SealedEnvelope, type X25519Slot } from './wrap';
+import { SEALED_POE_AEAD, type SealedEnvelope, type X25519Slot } from './wrap';
+import type { ItemHashes } from './transcript';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(here, '../../tests/fixtures/sealed-poe');
@@ -18,7 +19,7 @@ interface SlotHex {
 
 interface EnvelopeHex {
   scheme: 1;
-  aead: 'xchacha20-poly1305';
+  aead: string;
   kem: 'x25519';
   nonce_hex: string;
   slots: SlotHex[];
@@ -32,6 +33,7 @@ interface MultiPrivCorpus {
   vector: {
     name: string;
     recipient_privs_hex: string[];
+    hashes: Record<string, string>;
     envelope: EnvelopeHex;
     ciphertext_hex: string;
     expected_plaintext_hex: string;
@@ -44,6 +46,7 @@ interface MultiPrivCorpus {
 interface NegativeMatchedFalseMultipriv {
   name: string;
   envelope: EnvelopeHex;
+  hashes: Record<string, string>;
   ciphertext_hex: string;
   recipient_secret_keys_hex: string[];
   expected_reason: UnwrapFailureReason;
@@ -71,12 +74,16 @@ function envelopeFromHex(env: EnvelopeHex): SealedEnvelope {
   }));
   return {
     scheme: env.scheme,
-    aead: env.aead,
+    aead: env.aead as typeof SEALED_POE_AEAD,
     kem: env.kem,
     nonce: hexToBytes(env.nonce_hex),
     slots,
     slots_mac: hexToBytes(env.slots_mac_hex),
   };
+}
+
+function hashesFromHex(hashes: Record<string, string>): ItemHashes {
+  return Object.fromEntries(Object.entries(hashes).map(([alg, hex]) => [alg, hexToBytes(hex)]));
 }
 
 function loadMultipriv(filename: string): MultiPrivCorpus {
@@ -96,6 +103,7 @@ describe('sealed-poe unwrap — multi-priv current-match', () => {
     const res = eciesSealedPoeUnwrap({
       envelope,
       ciphertext,
+      hashes: hashesFromHex(vector.hashes),
       recipientSecretKeys: privs,
       _slotsAttemptedOut: slotsAttemptedOut,
       _privsAttemptedOut: privsAttemptedOut,
@@ -122,6 +130,7 @@ describe('sealed-poe unwrap — multi-priv archived-match', () => {
     const res = eciesSealedPoeUnwrap({
       envelope,
       ciphertext,
+      hashes: hashesFromHex(vector.hashes),
       recipientSecretKeys: privs,
       _slotsAttemptedOut: slotsAttemptedOut,
       _privsAttemptedOut: privsAttemptedOut,
@@ -152,6 +161,7 @@ describe('sealed-poe unwrap — multi-priv no-match', () => {
     const res = eciesSealedPoeUnwrap({
       envelope,
       ciphertext,
+      hashes: hashesFromHex(vector.hashes),
       recipientSecretKeys: privs,
       _slotsAttemptedOut: slotsAttemptedOut,
       _privsAttemptedOut: privsAttemptedOut,
@@ -187,6 +197,7 @@ describe('sealed-poe unwrap — multi-priv worst-case N=32 K=10', () => {
     const res = eciesSealedPoeUnwrap({
       envelope,
       ciphertext,
+      hashes: hashesFromHex(vector.hashes),
       recipientSecretKeys: privs,
       _slotsAttemptedOut: slotsAttemptedOut,
       _privsAttemptedOut: privsAttemptedOut,
@@ -217,6 +228,7 @@ describe('sealed-poe unwrap — multi-priv MAC fail returns TAMPERED_HEADER', ()
     const res = eciesSealedPoeUnwrap({
       envelope,
       ciphertext,
+      hashes: hashesFromHex(macFailVector.hashes),
       recipientSecretKeys: privs,
     });
     expect(res.matched).toBe(false);
@@ -226,14 +238,13 @@ describe('sealed-poe unwrap — multi-priv MAC fail returns TAMPERED_HEADER', ()
   });
 });
 
-// Constant-time-N matrix across (matching-priv, matching-slot)
+// Constant-across-slots matrix across (matching-priv, matching-slot)
 // scenarios. Pins the per-priv `_slotsAttemptedOut.perPrivCounts[i] === N`
 // invariant for every priv that entered the loop, independent of WHICH slot
-// matched within that priv (the inner-loop short-circuit is disabled when
-// constantTimeN=true, the default). The cross-priv variable-time channel
-// (which priv matched) is intentional Decision 1 design —
-// this matrix asserts the within-priv invariant only.
-describe('multi-priv constant-time-N matrix (K=5, N=32)', () => {
+// matched within that priv (the inner loop never short-circuits). The
+// cross-priv variable-time channel (which priv matched) is an accepted,
+// documented trade-off — this matrix asserts the within-priv invariant only.
+describe('multi-priv constant-across-slots matrix (K=5, N=32)', () => {
   const SCENARIOS = [
     {
       filename: 'unwrap-multipriv-ac9-priv0-slot0.json',
@@ -279,6 +290,7 @@ describe('multi-priv constant-time-N matrix (K=5, N=32)', () => {
       const res = eciesSealedPoeUnwrap({
         envelope,
         ciphertext,
+        hashes: hashesFromHex(vector.hashes),
         recipientSecretKeys: privs,
         _slotsAttemptedOut: slotsAttemptedOut,
         _privsAttemptedOut: privsAttemptedOut,
@@ -305,17 +317,19 @@ describe('sealed-poe unwrap — multi-priv input-validation raises', () => {
   const envelope = envelopeFromHex(positiveCorpus.vector.envelope);
   const ciphertext = hexToBytes(positiveCorpus.vector.ciphertext_hex);
   const validPriv = hexToBytes(positiveCorpus.vector.recipient_privs_hex[0]!);
+  const HASHES: ItemHashes = { 'sha2-256': new Uint8Array(32) };
 
   it('raises INVALID_RECIPIENT_KEY for empty recipientSecretKeys', () => {
     expect(() =>
       eciesSealedPoeUnwrap({
         envelope,
         ciphertext,
+        hashes: HASHES,
         recipientSecretKeys: [],
       }),
     ).toThrow(EciesSealedPoeError);
     try {
-      eciesSealedPoeUnwrap({ envelope, ciphertext, recipientSecretKeys: [] });
+      eciesSealedPoeUnwrap({ envelope, ciphertext, hashes: HASHES, recipientSecretKeys: [] });
     } catch (err) {
       expect(err).toBeInstanceOf(EciesSealedPoeError);
       if (err instanceof EciesSealedPoeError) {
@@ -329,6 +343,7 @@ describe('sealed-poe unwrap — multi-priv input-validation raises', () => {
       eciesSealedPoeUnwrap({
         envelope,
         ciphertext,
+        hashes: HASHES,
         recipientSecretKey: validPriv,
         recipientSecretKeys: [validPriv],
         // The discriminated-union surface forbids this at the type level; the
@@ -348,6 +363,7 @@ describe('sealed-poe unwrap — multi-priv input-validation raises', () => {
       eciesSealedPoeUnwrap({
         envelope,
         ciphertext,
+        hashes: HASHES,
       } as unknown as Parameters<typeof eciesSealedPoeUnwrap>[0]);
       throw new Error('expected EciesSealedPoeError');
     } catch (err) {
@@ -364,6 +380,7 @@ describe('sealed-poe unwrap — multi-priv input-validation raises', () => {
       eciesSealedPoeUnwrap({
         envelope,
         ciphertext,
+        hashes: HASHES,
         recipientSecretKeys: [validPriv, shortPriv, validPriv],
       });
       throw new Error('expected EciesSealedPoeError');

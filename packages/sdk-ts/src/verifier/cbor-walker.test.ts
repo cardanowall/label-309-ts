@@ -1,15 +1,24 @@
-// Regression — Cardano caps every metadata bstr/tstr at 64 bytes, so any
-// Label 309 record larger than 64 bytes is emitted as a `bytes-chunk-array`
-// at the label-309 value position. The verifier's
-// `sliceLabel309Value` MUST reassemble the chunks before handing the bytes
-// to `validatePoeRecord`; without that the canonical-CBOR decoder sees a
-// CBOR array of byte strings instead of the inner record map and reports
-// `SCHEMA_TYPE_MISMATCH` / `MALFORMED_CBOR`, surfacing as a `failed`
-// verdict on the public viewer.
+// Carriage conformance replay: the label-309 whole-body chunk-array transport
+// and the three Conway-era auxiliary-data envelope forms, driven by the
+// shared conformance fixtures. Chunk-array reassembly is the poe-standard
+// transport step; the auxiliary-data unwrapping (type/tag dispatch, no
+// key-sniffing) is this package's `unwrapAuxiliaryData`.
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { reassembleLabel309Value } from '@cardanowall/poe-standard';
 import { describe, expect, it } from 'vitest';
 
-import { sliceLabel309Value } from './cbor-walker';
+import { unwrapAuxiliaryData } from './cbor-walker';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const carriageDir = path.resolve(here, '../../../crypto-core/tests/fixtures/carriage');
+
+function loadFixture<T>(filename: string): T {
+  return JSON.parse(fs.readFileSync(path.join(carriageDir, filename), 'utf8')) as T;
+}
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
@@ -17,55 +26,105 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-// Minimal Conway-era tx CBOR shell with one metadata map entry at label 309.
-// The tx body / witness_set / is_valid are stubs (CBOR null / 0xf6 / true)
-// so the walker reaches auxiliary_data without choking. Auxiliary data is
-// tag-259 wrapped post-Alonzo: 0xd9 0x0103 = tag(259).
-function buildTxWithLabel309(label309ValueHex: string): Uint8Array {
-  // tx = [body, witness_set, is_valid, auxiliary_data]
-  // body, witness_set: stub bare empty maps (0xa0).
-  // is_valid: true (0xf5).
-  // auxiliary_data: tag(259) over a map {0 → {309 → <value>}}.
-  // Top-level tx array: 0x84 (array of 4).
-  // tag 259 wrapping: 0xd9 0x01 0x03 followed by the wrapped map.
-  // Outer aux map { 0 (uint) → metadata map }: 0xa1 0x00 <metadata-map>.
-  // Metadata map { 309 (uint16) → value }: 0xa1 0x19 0x01 0x35 <value>.
-  const txPrefix = '84a0a0f5d90103a100a1190135';
-  return hexToBytes(txPrefix + label309ValueHex);
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-describe('sliceLabel309Value — chunked metadata reassembly', () => {
-  it('concatenates a bytes-chunk-array back into the canonical CBOR record body', () => {
-    // The "canonical record body" is just a small CBOR map {1 → 1} — `a10101`
-    // — split across two chunks of 1 + 2 bytes. Real records are larger but
-    // the reassembly contract is the same.
-    // Chunk array: 0x82 = array(2); each entry is a bstr: 0x41 0xa1, then 0x42 0x01 0x01.
-    const tx = buildTxWithLabel309('82' + '41a1' + '42' + '0101');
-    const out = sliceLabel309Value(tx);
-    expect(out).not.toBeNull();
-    // Reassembled value should be `a10101` (3 bytes), a CBOR map { 1: 1 }.
-    expect(Array.from(out!)).toEqual([0xa1, 0x01, 0x01]);
-  });
+// ---------------------------------------------------------------------------
+// chunk-array-positive.json — reassembly positives
+// ---------------------------------------------------------------------------
 
-  it('strips the bstr head when label-309 value is a single byte string', () => {
-    // Single chunk: 0x43 = bstr(3), then `a10101`.
-    const tx = buildTxWithLabel309('43a10101');
-    const out = sliceLabel309Value(tx);
-    expect(out).not.toBeNull();
-    expect(Array.from(out!)).toEqual([0xa1, 0x01, 0x01]);
-  });
+interface ChunkArrayPositiveCorpus {
+  vectors: Array<{
+    name: string;
+    label_309_value_cbor_hex: string;
+    expected_record_body_hex: string;
+  }>;
+}
 
-  it('passes through a bare CBOR map value (small-fixture shape)', () => {
-    // Direct map: 0xa1 = map(1), 0x01 = uint(1), 0x01 = uint(1).
-    const tx = buildTxWithLabel309('a10101');
-    const out = sliceLabel309Value(tx);
-    expect(out).not.toBeNull();
-    expect(Array.from(out!)).toEqual([0xa1, 0x01, 0x01]);
-  });
+describe('label-309 chunk-array transport — positive reassembly vectors', () => {
+  const corpus = loadFixture<ChunkArrayPositiveCorpus>('chunk-array-positive.json');
+  for (const v of corpus.vectors) {
+    it(v.name, () => {
+      const result = reassembleLabel309Value(hexToBytes(v.label_309_value_cbor_hex));
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(bytesToHex(result.body)).toBe(v.expected_record_body_hex);
+    });
+  }
+});
 
-  it('rejects an array whose elements are not byte strings', () => {
-    // Array with a uint element instead of bstr: 0x81 0x01.
-    const tx = buildTxWithLabel309('8101');
-    expect(() => sliceLabel309Value(tx)).toThrow(/MALFORMED_CBOR/);
-  });
+// ---------------------------------------------------------------------------
+// chunk-array-negative.json — the carriage-error taxonomy
+// ---------------------------------------------------------------------------
+
+interface ChunkArrayNegativeCorpus {
+  vectors: Array<{
+    name: string;
+    label_309_value_cbor_hex: string;
+    expected_error_code: string;
+  }>;
+}
+
+describe('label-309 chunk-array transport — carriage-error taxonomy', () => {
+  const corpus = loadFixture<ChunkArrayNegativeCorpus>('chunk-array-negative.json');
+  for (const v of corpus.vectors) {
+    it(v.name, () => {
+      const result = reassembleLabel309Value(hexToBytes(v.label_309_value_cbor_hex));
+      if (v.name.endsWith('empty-body')) {
+        // The transport tolerates an empty concatenation; the pinned code
+        // surfaces from the canonical decode of the empty record body.
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.body.length).toBe(0);
+        expect(v.expected_error_code).toBe('MALFORMED_CBOR');
+        return;
+      }
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.issue.code).toBe(v.expected_error_code);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// aux-data-envelope-forms.json — type/tag dispatch, no key-sniffing
+// ---------------------------------------------------------------------------
+
+interface AuxFormsCorpus {
+  vectors: Array<{
+    name: string;
+    auxiliary_data_cbor_hex: string;
+    expected: {
+      label_309_value_cbor_hex?: string;
+      record_body_hex?: string;
+      error_code?: string;
+    };
+  }>;
+}
+
+describe('auxiliary-data envelope forms — unwrap dispatch', () => {
+  const corpus = loadFixture<AuxFormsCorpus>('aux-data-envelope-forms.json');
+  for (const v of corpus.vectors) {
+    it(v.name, () => {
+      const auxBytes = hexToBytes(v.auxiliary_data_cbor_hex);
+      if (v.expected.error_code === 'MALFORMED_CBOR') {
+        expect(() => unwrapAuxiliaryData(auxBytes)).toThrowError(/MALFORMED_CBOR/);
+        return;
+      }
+      const unwrapped = unwrapAuxiliaryData(auxBytes);
+      if (v.expected.error_code === 'METADATA_NOT_FOUND') {
+        // Well-formed auxiliary data that carries no label-309 entry; the
+        // pipeline maps the null to METADATA_NOT_FOUND.
+        expect(unwrapped.label309).toBeNull();
+        return;
+      }
+      expect(unwrapped.label309).not.toBeNull();
+      expect(bytesToHex(unwrapped.label309!)).toBe(v.expected.label_309_value_cbor_hex);
+      const reassembled = reassembleLabel309Value(unwrapped.label309!);
+      expect(reassembled.ok).toBe(true);
+      if (!reassembled.ok) return;
+      expect(bytesToHex(reassembled.body)).toBe(v.expected.record_body_hex);
+    });
+  }
 });

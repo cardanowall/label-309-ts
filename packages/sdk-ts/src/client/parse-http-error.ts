@@ -140,7 +140,16 @@ export function parseHttpError(args: ParseHttpErrorArgs): Label309HttpError {
       return new ForbiddenError(init);
     case 'insufficient-scope':
       return new InsufficientScopeError(init);
+    // The three 402 funding/affordability failures are one condition to a
+    // caller: the account cannot fund the operation. `insufficient-funds` is the
+    // balance shortfall; `insufficient-storage-credit` is the storage funding
+    // source being out of credit; `no-funding-grant` is the absence of any
+    // funding source entitling the account beyond the free window. All three
+    // surface as the same funding error so a caller routes the user to top up
+    // without branching on the code.
     case 'insufficient-funds':
+    case 'insufficient-storage-credit':
+    case 'no-funding-grant':
       return new InsufficientFundsError(init);
     case 'quote-expired':
       return new QuoteExpiredError(init);

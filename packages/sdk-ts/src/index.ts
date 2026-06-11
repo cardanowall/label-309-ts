@@ -25,8 +25,10 @@ export {
 } from '@cardanowall/poe-standard';
 
 export type {
-  ValidateResult,
+  ValidationResult,
   ValidationIssue,
+  ValidatorOptions,
+  ValidatorRole,
   ErrorCode,
   StructuralErrorCode,
   VerifierErrorCode,
@@ -78,6 +80,18 @@ export type {
   DerivedX25519KeyPair,
   DerivedMlKem768X25519KeyPair,
 } from '@cardanowall/crypto-core/seed-derive';
+
+// The identity-seed string codec: `encodeIdentitySeed` renders a 32-byte seed
+// as the checksummed uppercase `L309-SEED-1…` form; `parseIdentitySeed`
+// accepts that form (either single case) or 64-char raw hex and returns the
+// seed bytes, raising `SeedEncodingError` on anything malformed.
+export {
+  encodeIdentitySeed,
+  parseIdentitySeed,
+  IDENTITY_SEED_HRP,
+  SeedEncodingError,
+} from '@cardanowall/crypto-core/seed-derive';
+export type { SeedEncodingErrorCode } from '@cardanowall/crypto-core/seed-derive';
 
 // The recipient key bundle type used by the unwrap dispatch.
 export type { RecipientKeyBundle } from '@cardanowall/crypto-core/sealed-poe';

@@ -10,7 +10,7 @@ import {
   type HttpCallRecord,
 } from '@cardanowall/sdk-ts/fetch';
 
-const CONFORMANCE_DENY = ['cardanowall.com', '*.cardanowall.com', 'localhost', '127.0.0.1'];
+const CONFORMANCE_DENY = ['operator.example', '*.operator.example', 'localhost', '127.0.0.1'];
 
 describe('Layer 1 NXDOMAIN scaffold — deny-host short-circuit', () => {
   it('short-circuits with DenyHostError BEFORE inner fetch dispatch', async () => {
@@ -20,11 +20,11 @@ describe('Layer 1 NXDOMAIN scaffold — deny-host short-circuit', () => {
       denyHosts: CONFORMANCE_DENY,
     });
     await expect(
-      wrapped('https://cardanowall.com/anything', { method: 'GET', purpose: 'https' }),
+      wrapped('https://operator.example/anything', { method: 'GET', purpose: 'https' }),
     ).rejects.toBeInstanceOf(DenyHostError);
     expect(inner).not.toHaveBeenCalled();
     expect(audit).toHaveLength(1);
-    expect(audit[0]!.status).toBe(0);
+    expect(audit[0]!.status).toBeNull();
   });
 
   it('short-circuits wildcard subdomain BEFORE inner fetch dispatch', async () => {
@@ -34,7 +34,7 @@ describe('Layer 1 NXDOMAIN scaffold — deny-host short-circuit', () => {
       denyHosts: CONFORMANCE_DENY,
     });
     await expect(
-      wrapped('https://viewer.cardanowall.com/x', { method: 'GET', purpose: 'https' }),
+      wrapped('https://viewer.operator.example/x', { method: 'GET', purpose: 'https' }),
     ).rejects.toBeInstanceOf(DenyHostError);
     expect(inner).not.toHaveBeenCalled();
   });

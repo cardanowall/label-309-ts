@@ -4,6 +4,8 @@ export {
   defaultFetchOutbound,
   DenyHostError,
   fetchOutbound,
+  isBodyTooLargeError,
+  isDenyHostError,
   matchesDenyList,
   OutboundExhaustedError,
   UnsupportedMethodError,

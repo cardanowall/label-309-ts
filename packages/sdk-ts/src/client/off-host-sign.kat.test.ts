@@ -50,7 +50,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const fixturePath = path.resolve(here, '../../tests/fixtures/cose/sign1-build.json');
+const fixturePath = path.resolve(here, '../../../crypto-core/tests/fixtures/cose/sign1-build.json');
 const corpus = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as Sign1BuildCorpus;
 
 const DOMAIN_PREFIX_HEX = '63617264616e6f2d706f652d7265636f72642d7369672d7631';
@@ -104,18 +104,14 @@ describe.each(corpus.cardano_poe_vectors)(
       expect(bytesToHex(coseSign1Bytes)).toBe(vector.expected_cose_sign1_hex);
     });
 
-    it('assembleCoseSign1 emits byte-pinned chunked sigs[] entry', () => {
+    it('assembleCoseSign1 emits the byte-pinned single-bstr sigs[] entry', () => {
       const { sigStructureBytes } = prepareSigStructure({ record, signerPubkey });
       const sig = signEd25519({ seed: signerSeed, message: sigStructureBytes });
       const { sigEntry } = assembleCoseSign1({ record, signerPubkey, signature: sig });
+      expect(bytesToHex(sigEntry.cose_sign1)).toBe(vector.expected_cose_sign1_hex);
       if (vector.expected_sigs_entry_cbor_hex !== undefined) {
         const sigEntryCbor = encodeCanonicalCbor(sigEntry as unknown as CanonicalCborValue);
         expect(bytesToHex(sigEntryCbor)).toBe(vector.expected_sigs_entry_cbor_hex);
-      }
-      if (vector.expected_cose_sign1_chunks_hex !== undefined) {
-        expect(sigEntry.cose_sign1.map((c) => bytesToHex(c))).toEqual(
-          vector.expected_cose_sign1_chunks_hex,
-        );
       }
     });
   },

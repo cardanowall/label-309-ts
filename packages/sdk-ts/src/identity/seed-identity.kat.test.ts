@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { sha256 } from '@cardanowall/crypto-core/hash';
 import { eciesSealedPoeWrap, type SealedEnvelope } from '@cardanowall/crypto-core/sealed-poe';
 import { verifyEd25519 } from '@cardanowall/crypto-core/sig';
 import type { PoeRecord } from '@cardanowall/poe-standard';
@@ -241,12 +242,16 @@ describe('seed → decrypt a HYBRID (mlkem768x25519) sealed PoE', () => {
       'e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1',
   );
   const PLAINTEXT = new TextEncoder().encode('hybrid sealed PoE plaintext');
+  // The item's plaintext-hash claim, bound into the slots transcript by the
+  // wrap and required again at unwrap time.
+  const HASHES = { 'sha2-256': sha256(PLAINTEXT) };
 
   function wrapHybridToSeed(seedHex: string): { envelope: SealedEnvelope; ciphertext: Uint8Array } {
     const seed = hexToBytes(seedHex);
     const recipientPublicKey = deriveKeysFromSeed(seed).mlkem768x25519.publicKey;
     const out = eciesSealedPoeWrap({
       plaintext: PLAINTEXT,
+      hashes: HASHES,
       recipientPublicKeys: [recipientPublicKey],
       kem: 'mlkem768x25519',
       cek: CEK,
@@ -265,6 +270,7 @@ describe('seed → decrypt a HYBRID (mlkem768x25519) sealed PoE', () => {
         seed: hexToBytes(vector.seed_hex),
         envelope,
         ciphertext,
+        hashes: HASHES,
       });
 
       expect(result.matched).toBe(true);
@@ -279,7 +285,7 @@ describe('seed → decrypt a HYBRID (mlkem768x25519) sealed PoE', () => {
     const { envelope, ciphertext } = wrapHybridToSeed(seedVectors[0]!.seed_hex);
     const wrongSeed = hexToBytes(seedVectors[1]!.seed_hex);
 
-    const result = decryptSealedFromSeed({ seed: wrongSeed, envelope, ciphertext });
+    const result = decryptSealedFromSeed({ seed: wrongSeed, envelope, ciphertext, hashes: HASHES });
 
     expect(result.matched).toBe(false);
     if (!result.matched) {

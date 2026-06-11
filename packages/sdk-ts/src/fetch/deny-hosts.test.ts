@@ -9,7 +9,7 @@ import {
   UnsupportedProtocolError,
 } from './deny-hosts';
 
-const TEST_DENY = ['cardanowall.com', '*.cardanowall.com', 'localhost', '127.0.0.1'] as const;
+const TEST_DENY = ['operator.example', '*.operator.example', 'localhost', '127.0.0.1'] as const;
 
 function okFetch(body: string, status = 200): typeof fetch {
   return async () =>
@@ -42,63 +42,63 @@ describe('denyHostsFetch', () => {
     expect(entry?.status).toBe(200);
     expect(entry?.bytes).toBe('ok-body'.length);
     expect(entry?.purpose).toBe('https');
-    expect(entry?.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(entry?.durationMs).toBeGreaterThanOrEqual(0);
   });
 
   it('fails synchronously with DenyHostError on exact-match denied host and records audit row', async () => {
     const opts = baseOpts();
     await expect(
-      denyHostsFetch('https://cardanowall.com/anything', undefined, opts),
+      denyHostsFetch('https://operator.example/anything', undefined, opts),
     ).rejects.toBeInstanceOf(DenyHostError);
     // The deny path records an audit row before throwing, so the rejected
     // attempt is still visible in the audit trail.
     expect(opts.audit).toHaveLength(1);
-    expect(opts.audit[0]?.status).toBe(0);
-    expect(opts.audit[0]?.duration_ms).toBe(0);
+    expect(opts.audit[0]?.status).toBeNull();
+    expect(opts.audit[0]?.durationMs).toBe(0);
   });
 
   it('attaches host, url, and SERVICE_INDEPENDENCE_VIOLATION code to DenyHostError', async () => {
     const opts = baseOpts();
     try {
-      await denyHostsFetch('https://cardanowall.com/secret', undefined, opts);
+      await denyHostsFetch('https://operator.example/secret', undefined, opts);
       throw new Error('expected denyHostsFetch to throw');
     } catch (e) {
       expect(e).toBeInstanceOf(DenyHostError);
       const err = e as DenyHostError;
       expect(err.code).toBe('SERVICE_INDEPENDENCE_VIOLATION');
-      expect(err.host).toBe('cardanowall.com');
-      expect(err.url).toBe('https://cardanowall.com/secret');
+      expect(err.host).toBe('operator.example');
+      expect(err.url).toBe('https://operator.example/secret');
     }
   });
 
   it('matches wildcard subdomain entries (single label) and pins host to actual hostname', async () => {
     const opts = baseOpts();
     try {
-      await denyHostsFetch('https://api.cardanowall.com/v1', undefined, opts);
+      await denyHostsFetch('https://api.operator.example/v1', undefined, opts);
       throw new Error('expected denyHostsFetch to throw');
     } catch (e) {
       expect(e).toBeInstanceOf(DenyHostError);
       const err = e as DenyHostError;
-      expect(err.host).toBe('api.cardanowall.com');
+      expect(err.host).toBe('api.operator.example');
       expect(err.code).toBe('SERVICE_INDEPENDENCE_VIOLATION');
     }
     expect(opts.audit).toHaveLength(1);
-    expect(opts.audit[0]?.status).toBe(0);
+    expect(opts.audit[0]?.status).toBeNull();
   });
 
   it('matches wildcard subdomain entries (multi-label depth) and pins host to actual hostname', async () => {
     const opts = baseOpts();
     try {
-      await denyHostsFetch('https://nested.api.cardanowall.com/x', undefined, opts);
+      await denyHostsFetch('https://nested.api.operator.example/x', undefined, opts);
       throw new Error('expected denyHostsFetch to throw');
     } catch (e) {
       expect(e).toBeInstanceOf(DenyHostError);
       const err = e as DenyHostError;
-      expect(err.host).toBe('nested.api.cardanowall.com');
+      expect(err.host).toBe('nested.api.operator.example');
       expect(err.code).toBe('SERVICE_INDEPENDENCE_VIOLATION');
     }
     expect(opts.audit).toHaveLength(1);
-    expect(opts.audit[0]?.status).toBe(0);
+    expect(opts.audit[0]?.status).toBeNull();
   });
 
   it('denies localhost and 127.0.0.1 to forbid loopback indirection', async () => {
@@ -115,10 +115,10 @@ describe('denyHostsFetch', () => {
 
   it('allows any host when denyHosts is empty', async () => {
     const opts = baseOpts({ denyHosts: [], fetchImpl: okFetch('whatever') });
-    const response = await denyHostsFetch('https://cardanowall.com/should-pass', undefined, opts);
+    const response = await denyHostsFetch('https://operator.example/should-pass', undefined, opts);
     expect(response.status).toBe(200);
     expect(opts.audit).toHaveLength(1);
-    expect(opts.audit[0]?.url).toBe('https://cardanowall.com/should-pass');
+    expect(opts.audit[0]?.url).toBe('https://operator.example/should-pass');
   });
 
   it('propagates POST method and respects purpose tag', async () => {
@@ -149,9 +149,9 @@ describe('denyHostsFetch', () => {
     };
     await expect(denyHostsFetch('https://example.com/x', undefined, opts)).rejects.toBe(original);
     expect(audit).toHaveLength(1);
-    expect(audit[0]?.status).toBe(0);
+    expect(audit[0]?.status).toBeNull();
     expect(audit[0]?.bytes).toBe(0);
-    expect(audit[0]?.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(audit[0]?.durationMs).toBeGreaterThanOrEqual(0);
   });
 
   it('rejects data: URL with UnsupportedProtocolError + audit row', async () => {
@@ -160,7 +160,7 @@ describe('denyHostsFetch', () => {
       denyHostsFetch('data:text/plain;base64,SGVsbG8=', undefined, opts),
     ).rejects.toBeInstanceOf(UnsupportedProtocolError);
     expect(opts.audit).toHaveLength(1);
-    expect(opts.audit[0]?.status).toBe(0);
+    expect(opts.audit[0]?.status).toBeNull();
   });
 
   it('rejects file: URL with UnsupportedProtocolError', async () => {

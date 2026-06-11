@@ -1,6 +1,6 @@
 {
   "name": "@cardanowall/poe-standard",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Label 309 Proof-of-Existence record schema, canonical-CBOR encoder, and validator.",
   "license": "Apache-2.0",
@@ -35,6 +35,12 @@
       "development": "./src/encoder.ts",
       "import": "./dist/encoder.js",
       "require": "./dist/encoder.cjs"
+    },
+    "./carriage": {
+      "types": "./dist/carriage.d.ts",
+      "development": "./src/carriage.ts",
+      "import": "./dist/carriage.js",
+      "require": "./dist/carriage.cjs"
     },
     "./validator": {
       "types": "./dist/validator.d.ts",

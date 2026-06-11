@@ -1,398 +1,545 @@
-// Label 309 standalone verifier entry point.
+// Label 309 standalone verifier — the Part B pipeline.
 //
-// Pipeline (steps run sequentially; the verdict is the worst outcome across them):
-//   1. Resolve Cardano gateway + raw tx CBOR + confirmation depth.
-//   2. Byte-faithful extract of label-309 metadata.
-//   3. Structural validator (Part A; never throws).
-//   4. Confirmation-depth check → INSUFFICIENT_CONFIRMATIONS / verdict 'pending'.
-//   5. Profile-gated work (signed: signatures; sealed: enc structure;
-//      recipient-sealed: decrypt). Out-of-profile fields emit
-//      OUT_OF_PROFILE_SKIPPED (info) — not SCHEMA_UNKNOWN_FIELD.
-//   6. Merkle list-commitment verification (awaited after step 5).
-//   7. Three-state verdict emission with exit-code mapping.
+// `verifyTx` executes, in order; a step whose outcome forecloses the rest
+// short-circuits the pipeline:
+//
+//   1.  Resolve the transaction via the explorer chain (raw tx CBOR, never a
+//       JSON projection). Negative outcomes split three ways: TX_NOT_FOUND /
+//       PROVIDER_UNAVAILABLE → `unverifiable`.
+//   2.  Bind the fetched bytes to the transaction reference — blake2b-256
+//       over the body vs the requested hash, blake2b-256 over the auxiliary
+//       data vs the body's auxiliary_data_hash; no surviving response →
+//       TX_INTEGRITY_MISMATCH, `unverifiable` (provider-provable, never
+//       record-attributable).
+//   3.  Unwrap the auxiliary data (all three Conway envelope forms, dispatch
+//       on type/tag only) and reassemble the label-309 chunk array. No
+//       label-309 entry → METADATA_NOT_FOUND, `failed` (the absence is
+//       proven by the integrity-bound transaction itself).
+//   4.  Structurally validate (`validatePoeRecord`), with the validator role
+//       matching the verifier mode: a run that will actually decrypt —
+//       decryption credentials held AND the profile admits sealed decryption
+//       — is a RECIPIENT verifier ('recipient_or_strict'); otherwise 'public'.
+//   5.  Check confirmation depth — below threshold → INSUFFICIENT_CONFIRMATIONS,
+//       verdict `pending`, pipeline halts (results computed against a
+//       transaction that may yet be orphaned must not be presented as final).
+//   6.  Verify record signatures (strict Ed25519, detached payload, verbatim
+//       protected bytes, wallet-address network binding).
+//   7.  Fetch and hash-check plain-item content and Merkle leaves-lists
+//       (first-success-for-availability; integrity vs attribution vs
+//       availability split; suppressed by `fetchContent: false`).
+//   8.  Decrypt `enc`-bearing items with the keyring (recipient verifier),
+//       including the post-decryption plaintext-hash recheck.
+//   9.  (`supersedes` is an advisory pointer; this implementation performs
+//       no existence hop.)
+//   10. Emit the report: verdict ∈ valid | pending | unverifiable | failed,
+//       exit codes 0 | 3 | 2 | 1 respectively, issues sorted by path then
+//       registry order, one per-claim entry per item / commitment, and the
+//       complete audit trail of every outbound call.
+//
+// `verifyResolved` runs the same pipeline from step 4 onward over
+// caller-supplied record-body bytes plus an explorer-asserted block-info
+// tuple.
 
-import { SEVERITY, validatePoeRecord, type ValidationIssue } from '@cardanowall/poe-standard';
+import {
+  SEVERITY,
+  reassembleLabel309Value,
+  validatePoeRecord,
+  type ErrorCode,
+  type PoeRecord,
+  type ValidationIssue,
+} from '@cardanowall/poe-standard';
 
-import { tryDecryptions } from './decrypt';
-import { defaultFetchOutbound, wrapFetchOutbound } from './fetch';
-import { verifyMerkleCommitments } from './merkle';
+import { defaultFetchOutbound, isDenyHostError, wrapFetchOutbound } from '../fetch/fetch-outbound';
+import { ARWEAVE_GATEWAY_DEFAULTS, type ContentFetchContext } from './content';
+import { sliceTxComponents, unwrapAuxiliaryData } from './cbor-walker';
+import { decryptItem } from './decrypt';
+import { checkItemContent } from './items';
+import { IssueSink, issueOf, sortIssues } from './issues';
+import { checkMerkleCommit, type MerkleCommitOutcome } from './merkle';
 import { DEFAULT_PROFILE, planProfileSkips } from './profile';
-import { extractLabel309Metadata, NotALabel309RecordError, resolveCardanoTx } from './resolve';
+import { resolveCardanoTx } from './resolve';
 import { verifyRecordSignatures } from './signatures';
-import { sliceTxComponents } from './cbor-walker';
 import { decodeTxSummary, decodeTxWitnesses } from './tx-witnesses';
 import type {
   ExitCode,
-  FetchOutbound,
   HttpCallRecord,
+  ItemReportEntry,
+  MerkleReportEntry,
   Profile,
-  VerifyItemDecryption,
-  VerifyMerkleCheck,
-  VerifyRecordSignature,
-  VerifyReport,
-  VerifyTxInput,
-  VerifyUriCheck,
   Verdict,
+  VerifyReport,
+  VerifyResolvedInput,
+  VerifyTxInput,
 } from './types';
+import { EXIT_CODE_FOR_VERDICT, PROFILE_RANK } from './types';
 
 export const CONFIRMATION_DEPTH_THRESHOLD_DEFAULT = 15;
 
-type MutableReport = { -readonly [K in keyof VerifyReport]: VerifyReport[K] };
+// Error-severity codes that are NOT record-attributable: network, policy, and
+// provider-integrity outcomes. They block a `valid` verdict but can never
+// condemn the record — the verdict they produce is `unverifiable`. Every
+// other error-severity code is record-attributable and produces `failed`.
+const NETWORK_CLASS_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
+  'TX_NOT_FOUND',
+  'PROVIDER_UNAVAILABLE',
+  'TX_INTEGRITY_MISMATCH',
+  'CONTENT_UNAVAILABLE',
+  'CONTENT_FETCH_LIMIT_EXCEEDED',
+  'CIPHERTEXT_UNAVAILABLE',
+  'MERKLE_LEAVES_UNAVAILABLE',
+  'URI_TARGET_FORBIDDEN',
+]);
+
+function verdictFromIssues(issues: ReadonlyArray<ValidationIssue>): Verdict {
+  let sawNetworkError = false;
+  for (const issue of issues) {
+    if (issue.severity !== 'error') continue;
+    if (!NETWORK_CLASS_CODES.has(issue.code)) return 'failed';
+    sawNetworkError = true;
+  }
+  return sawNetworkError ? 'unverifiable' : 'valid';
+}
+
+interface ChainFacts {
+  readonly confirmationDepth: number;
+  readonly blockTime: number;
+  readonly blockSlot?: number | undefined;
+}
+
+interface ReportSkeleton {
+  readonly txHash: string;
+  readonly network: string;
+  readonly profile: Profile;
+  readonly threshold: number;
+  readonly auditTrail: HttpCallRecord[];
+  readonly chainFacts?: ChainFacts | undefined;
+  readonly txDescription: TxDescriptionFields;
+}
+
+function assembleReport(args: {
+  readonly skeleton: ReportSkeleton;
+  readonly issues: ReadonlyArray<ValidationIssue>;
+  readonly verdict: Verdict;
+  readonly items?: ReadonlyArray<ItemReportEntry>;
+  readonly merkle?: ReadonlyArray<MerkleReportEntry>;
+  readonly record?: PoeRecord | undefined;
+  readonly signatures?: VerifyReport['signatures'] | undefined;
+}): VerifyReport {
+  const { skeleton } = args;
+  const exitCode: ExitCode = EXIT_CODE_FOR_VERDICT[args.verdict];
+  const facts = skeleton.chainFacts;
+  return {
+    verdict: args.verdict,
+    exitCode,
+    issues: sortIssues(args.issues),
+    items: args.items ?? [],
+    merkle: args.merkle ?? [],
+    auditTrail: skeleton.auditTrail,
+    network: skeleton.network,
+    txHash: skeleton.txHash,
+    profile: skeleton.profile,
+    confirmationThreshold: skeleton.threshold,
+    ...(facts !== undefined
+      ? {
+          confirmationDepth: facts.confirmationDepth,
+          block_time: facts.blockTime,
+          ...(facts.blockSlot !== undefined ? { block_slot: facts.blockSlot } : {}),
+        }
+      : {}),
+    ...(args.record !== undefined ? { record: args.record } : {}),
+    ...(args.signatures !== undefined && args.signatures.length > 0
+      ? { signatures: args.signatures }
+      : {}),
+    ...skeleton.txDescription,
+  };
+}
 
 export async function verifyTx(input: VerifyTxInput): Promise<VerifyReport> {
   const profile = input.profile ?? DEFAULT_PROFILE;
   const threshold = input.confirmationDepthThreshold ?? CONFIRMATION_DEPTH_THRESHOLD_DEFAULT;
-  const httpCalls: HttpCallRecord[] = [];
+  const cardanoNetwork = input.cardanoNetwork ?? 'mainnet';
+  const auditTrail: HttpCallRecord[] = [];
   const fetchFn = wrapFetchOutbound(
     input.fetchOutbound ?? defaultFetchOutbound,
-    httpCalls,
+    auditTrail,
     input.denyHosts,
   );
 
-  const base = (
-    over: Partial<VerifyReport> & Pick<VerifyReport, 'verdict' | 'exit_code'>,
-  ): VerifyReport => ({
-    tx_hash: input.txHash,
-    network: 'cardano:mainnet',
+  const baseSkeleton: ReportSkeleton = {
+    txHash: input.txHash,
+    network: `cardano:${cardanoNetwork}`,
     profile,
-    num_confirmations: 0,
-    confirmation_depth_threshold: threshold,
-    metadata_present: false,
-    validation: { valid: false },
-    http_calls: httpCalls,
-    ...over,
-  });
+    threshold,
+    auditTrail,
+    txDescription: {},
+  };
 
-  // 1. Resolve Cardano gateway + raw tx CBOR.
-  let resolved;
   try {
-    resolved = await resolveCardanoTx({ input, fetchFn });
+    return await runVerifyTx({ input, profile, threshold, cardanoNetwork, baseSkeleton, fetchFn });
   } catch (e) {
-    if (e instanceof NotALabel309RecordError) {
-      return base({
+    // A RESOLVE-path call (explorer adapter) targeted a denyHosts entry: the
+    // egress hard-failed it and the violation is terminal for the run — no
+    // transaction was resolved, so there is nothing to verify. The report
+    // carries one SERVICE_INDEPENDENCE_VIOLATION at the empty path, verdict
+    // `failed`. Content-path deny-hits never reach here: the content engine
+    // records them per attempt at the claim's uris[] path and continues.
+    if (isDenyHostError(e)) {
+      return assembleReport({
+        skeleton: baseSkeleton,
+        issues: [issueOf('SERVICE_INDEPENDENCE_VIOLATION', [], e.message)],
         verdict: 'failed',
-        exit_code: 1,
-        validation: {
-          valid: false,
-          issues: [issueOf('METADATA_NOT_FOUND', [], e.message)],
-        },
       });
     }
-    return base({
-      verdict: 'failed',
-      exit_code: 2,
-      validation: {
-        valid: false,
-        issues: [issueOf('PROVIDER_UNAVAILABLE', [], (e as Error).message)],
-      },
-    });
+    throw e;
   }
+}
 
-  // 2. Byte-faithful label-309 extraction.
-  let metadataBytes: Uint8Array | null;
-  try {
-    metadataBytes = extractLabel309Metadata(resolved.txCbor);
-  } catch (e) {
-    return base({
-      verdict: 'failed',
-      exit_code: 1,
-      num_confirmations: resolved.numConfirmations,
-      block_time: resolved.blockTime,
-      block_slot: resolved.blockSlot,
-      validation: {
-        valid: false,
-        issues: [issueOf('MALFORMED_CBOR', [], (e as Error).message)],
-      },
-    });
-  }
-  if (metadataBytes === null) {
-    return base({
-      verdict: 'failed',
-      exit_code: 1,
-      num_confirmations: resolved.numConfirmations,
-      block_time: resolved.blockTime,
-      block_slot: resolved.blockSlot,
-      metadata_present: false,
-      validation: {
-        valid: false,
-        issues: [issueOf('METADATA_NOT_FOUND', [], 'no label-309 metadata on this tx')],
-      },
-    });
-  }
+async function runVerifyTx(args: {
+  readonly input: VerifyTxInput;
+  readonly profile: Profile;
+  readonly threshold: number;
+  readonly cardanoNetwork: 'mainnet' | 'preprod';
+  readonly baseSkeleton: ReportSkeleton;
+  readonly fetchFn: ReturnType<typeof wrapFetchOutbound>;
+}): Promise<VerifyReport> {
+  const { input, profile, threshold, cardanoNetwork, baseSkeleton, fetchFn } = args;
 
-  return verifyResolvedRecord({
-    input,
-    metadataBytes,
-    txCbor: resolved.txCbor,
-    numConfirmations: resolved.numConfirmations,
-    blockTime: resolved.blockTime,
-    blockSlot: resolved.blockSlot,
-    httpCalls,
+  // Steps 1 + 2 — resolve via the explorer chain with the integrity binding
+  // applied per response.
+  const outcome = await resolveCardanoTx({
+    txHash: input.txHash,
+    cardanoGatewayChain: input.cardanoGatewayChain,
+    blockfrostProjectId: input.blockfrostProjectId,
     fetchFn,
+  });
+  if (!outcome.ok) {
+    const issues = [issueOf(outcome.code, [], outcome.message)];
+    return assembleReport({
+      skeleton: baseSkeleton,
+      issues,
+      verdict: verdictFromIssues(issues),
+    });
+  }
+  const { resolved } = outcome;
+  const skeleton: ReportSkeleton = {
+    ...baseSkeleton,
+    chainFacts: {
+      confirmationDepth: resolved.confirmationDepth,
+      blockTime: resolved.blockTime,
+      blockSlot: resolved.blockSlot,
+    },
+    txDescription: decodeTxDescription(resolved.txCbor, cardanoNetwork),
+  };
+
+  // Step 3 — unwrap the bound auxiliary data and reassemble the record body.
+  let label309: Uint8Array | null;
+  try {
+    label309 =
+      resolved.components.auxiliaryData === null
+        ? null
+        : unwrapAuxiliaryData(resolved.components.auxiliaryData).label309;
+  } catch (e) {
+    const issues = [issueOf('MALFORMED_CBOR', [], e instanceof Error ? e.message : String(e))];
+    return assembleReport({ skeleton, issues, verdict: 'failed' });
+  }
+  if (label309 === null) {
+    const issues = [
+      issueOf(
+        'METADATA_NOT_FOUND',
+        [],
+        'the integrity-bound transaction carries no metadata under label 309',
+      ),
+    ];
+    return assembleReport({ skeleton, issues, verdict: 'failed' });
+  }
+  const reassembly = reassembleLabel309Value(label309);
+  if (!reassembly.ok) {
+    return assembleReport({ skeleton, issues: [reassembly.issue], verdict: 'failed' });
+  }
+
+  return verifyRecordBody({
+    skeleton,
+    recordBody: reassembly.body,
+    chainFacts: skeleton.chainFacts!,
+    fetchFn,
+    input: {
+      profile,
+      cardanoNetwork,
+      threshold,
+      fetchContent: input.fetchContent ?? true,
+      maxFetchBytes: input.maxFetchBytes,
+      decryption: input.decryption ?? [],
+      ciphertextBytes: input.ciphertextBytes,
+      merkleLeaves: input.merkleLeaves,
+      arweaveGateways:
+        input.arweaveGatewayChain && input.arweaveGatewayChain.length > 0
+          ? input.arweaveGatewayChain
+          : ARWEAVE_GATEWAY_DEFAULTS,
+      ipfsGateways: input.ipfsGatewayChain ?? [],
+    },
   });
 }
 
 /**
- * `verifyResolved` — same pipeline as `verifyTx` starting from step 3
- * (structural validator). The caller has already resolved the label-309
- * metadata bytes + block-info tuple from somewhere other than a live chain
- * fetch (typically an indexer database mirror).
- *
- * Use this when you trust an upstream indexer for the (metadataCbor,
- * blockTime, blockSlot, numConfirmations) tuple and want to skip the
- * /tx_cbor + /tx_info round-trip. The caller is responsible for the
- * confidence that the supplied bytes actually came from the label-309
- * metadata field of a confirmed Cardano transaction.
+ * Sibling entry point: run the pipeline from the structural-validator step
+ * onward over caller-supplied label-309 record-body bytes plus an
+ * explorer-asserted block-info tuple — the path a server-rendered viewer uses
+ * to display on-chain data without a render-time chain fetch. The caller is
+ * responsible for the confidence that the bytes came from the label-309
+ * metadata of a real Cardano transaction.
  */
-export async function verifyResolved(input: {
-  txHash: string;
-  metadataCbor: Uint8Array;
-  // Raw on-chain transaction CBOR. When supplied, the report also carries the
-  // transaction-level description (tx_witnesses, tx_summary, metadata_labels);
-  // when absent, those three fields are left undefined. The label-309 record
-  // is always taken from `metadataCbor`, never re-derived from `txCbor`.
-  txCbor?: Uint8Array;
-  numConfirmations: number;
-  blockTime?: number;
-  blockSlot?: number;
-  network?: VerifyReport['network'];
-  cardanoNetwork?: VerifyTxInput['cardanoNetwork'];
-  profile?: Profile;
-  confirmationDepthThreshold?: number;
-  fetchOutbound?: FetchOutbound;
-  denyHosts?: ReadonlyArray<string>;
-  decryption?: VerifyTxInput['decryption'];
-  // Mirrors `VerifyTxInput.verifyMerkle`. SSR callers pass `false` so the
-  // viewer renders from indexed CBOR alone with no Arweave/IPFS leaves-list
-  // fetch (deferred to a user-initiated client-side action instead).
-  verifyMerkle?: boolean;
-}): Promise<VerifyReport> {
-  const httpCalls: HttpCallRecord[] = [];
-  const fetchFn = wrapFetchOutbound(
-    input.fetchOutbound ?? defaultFetchOutbound,
-    httpCalls,
-    input.denyHosts,
-  );
-  // Reuse the post-resolve pipeline by adapting the caller's args back into
-  // the VerifyTxInput shape that signature/decryption/merkle helpers expect.
-  const verifyTxInput: VerifyTxInput = {
-    txHash: input.txHash,
-    ...(input.profile !== undefined ? { profile: input.profile } : {}),
-    ...(input.cardanoNetwork !== undefined ? { cardanoNetwork: input.cardanoNetwork } : {}),
-    ...(input.confirmationDepthThreshold !== undefined
-      ? { confirmationDepthThreshold: input.confirmationDepthThreshold }
-      : {}),
-    ...(input.fetchOutbound !== undefined ? { fetchOutbound: input.fetchOutbound } : {}),
-    ...(input.denyHosts !== undefined ? { denyHosts: input.denyHosts } : {}),
-    ...(input.decryption !== undefined ? { decryption: input.decryption } : {}),
-    ...(input.verifyMerkle !== undefined ? { verifyMerkle: input.verifyMerkle } : {}),
-  };
-  const report = await verifyResolvedRecord({
-    input: verifyTxInput,
-    metadataBytes: input.metadataCbor,
-    ...(input.txCbor !== undefined ? { txCbor: input.txCbor } : {}),
-    numConfirmations: input.numConfirmations,
-    ...(input.blockTime !== undefined ? { blockTime: input.blockTime } : {}),
-    ...(input.blockSlot !== undefined ? { blockSlot: input.blockSlot } : {}),
-    httpCalls,
-    fetchFn,
-  });
-  if (input.network !== undefined) {
-    return { ...report, network: input.network };
+export async function verifyResolved(input: VerifyResolvedInput): Promise<VerifyReport> {
+  // The caller vouches for the block-info tuple, and a transaction in a block
+  // has depth = tip − block + 1 ≥ 1 by definition — so a smaller (or
+  // non-integer) confirmationDepth is a caller-input error, never a
+  // verification outcome.
+  if (!Number.isInteger(input.confirmationDepth) || input.confirmationDepth < 1) {
+    throw new RangeError(
+      `confirmationDepth must be an integer >= 1 (a transaction in the tip block has depth exactly 1); got ${input.confirmationDepth}`,
+    );
   }
-  return report;
-}
-
-async function verifyResolvedRecord(args: {
-  input: VerifyTxInput;
-  metadataBytes: Uint8Array;
-  txCbor?: Uint8Array;
-  numConfirmations: number;
-  blockTime?: number;
-  blockSlot?: number;
-  httpCalls: HttpCallRecord[];
-  fetchFn: ReturnType<typeof wrapFetchOutbound>;
-}): Promise<VerifyReport> {
-  const {
-    input,
-    metadataBytes,
-    txCbor,
-    numConfirmations,
-    blockTime,
-    blockSlot,
-    httpCalls,
-    fetchFn,
-  } = args;
   const profile = input.profile ?? DEFAULT_PROFILE;
   const threshold = input.confirmationDepthThreshold ?? CONFIRMATION_DEPTH_THRESHOLD_DEFAULT;
-
-  // Transaction-level description — who authorised/paid for the anchoring,
-  // distinct from record-level authorship. Decoded once when the raw tx CBOR
-  // is available, then merged into every report shape below. This is pure
-  // description: it never gates on profile and never changes the verdict.
-  const txDescription = txCbor !== undefined ? decodeTxDescription(txCbor, input) : {};
-
-  const base = (
-    over: Partial<VerifyReport> & Pick<VerifyReport, 'verdict' | 'exit_code'>,
-  ): VerifyReport => ({
-    tx_hash: input.txHash,
-    network: 'cardano:mainnet',
+  const cardanoNetwork = input.cardanoNetwork ?? 'mainnet';
+  const auditTrail: HttpCallRecord[] = [];
+  const fetchFn = wrapFetchOutbound(
+    input.fetchOutbound ?? defaultFetchOutbound,
+    auditTrail,
+    input.denyHosts,
+  );
+  const skeleton: ReportSkeleton = {
+    txHash: input.txHash,
+    network: input.network ?? `cardano:${cardanoNetwork}`,
     profile,
-    num_confirmations: 0,
-    confirmation_depth_threshold: threshold,
-    metadata_present: false,
-    validation: { valid: false },
-    http_calls: httpCalls,
-    ...txDescription,
-    ...over,
+    threshold,
+    auditTrail,
+    chainFacts: {
+      confirmationDepth: input.confirmationDepth,
+      blockTime: input.blockTime,
+      blockSlot: input.blockSlot,
+    },
+    txDescription:
+      input.txCbor !== undefined ? decodeTxDescription(input.txCbor, cardanoNetwork) : {},
+  };
+  // No resolve step runs here, and content-path deny-hits are recorded per
+  // attempt inside the content engine, so no DenyHostError can escape.
+  return verifyRecordBody({
+    skeleton,
+    recordBody: input.metadataCbor,
+    chainFacts: skeleton.chainFacts!,
+    fetchFn,
+    input: {
+      profile,
+      cardanoNetwork,
+      threshold,
+      fetchContent: input.fetchContent ?? true,
+      maxFetchBytes: input.maxFetchBytes,
+      decryption: input.decryption ?? [],
+      ciphertextBytes: input.ciphertextBytes,
+      merkleLeaves: input.merkleLeaves,
+      arweaveGateways:
+        input.arweaveGatewayChain && input.arweaveGatewayChain.length > 0
+          ? input.arweaveGatewayChain
+          : ARWEAVE_GATEWAY_DEFAULTS,
+      ipfsGateways: input.ipfsGatewayChain ?? [],
+    },
   });
+}
 
-  // 3. Structural validator (Part A).
-  const validation = validatePoeRecord(metadataBytes);
-  if (!validation.ok) {
-    return base({
+interface PipelineOptions {
+  readonly profile: Profile;
+  readonly cardanoNetwork: 'mainnet' | 'preprod';
+  readonly threshold: number;
+  readonly fetchContent: boolean;
+  readonly maxFetchBytes: number | undefined;
+  readonly decryption: ReadonlyArray<
+    { readonly recipientSecretKey: Uint8Array } | { readonly passphrase: string }
+  >;
+  readonly ciphertextBytes: Readonly<Record<number, Uint8Array>> | undefined;
+  readonly merkleLeaves: Readonly<Record<number, Uint8Array>> | undefined;
+  readonly arweaveGateways: ReadonlyArray<string>;
+  readonly ipfsGateways: ReadonlyArray<string>;
+}
+
+async function verifyRecordBody(args: {
+  readonly skeleton: ReportSkeleton;
+  readonly recordBody: Uint8Array;
+  readonly chainFacts: ChainFacts;
+  readonly fetchFn: ReturnType<typeof wrapFetchOutbound>;
+  readonly input: PipelineOptions;
+}): Promise<VerifyReport> {
+  const { skeleton, input } = args;
+
+  // Step 4 — structural validation, with the role matching the verifier
+  // mode: a run that will actually decrypt (credentials held AND the profile
+  // implements decryption) is a recipient verifier, whose validator
+  // hard-rejects envelopes it cannot fully validate (ENC_UNSUPPORTED
+  // escalates to error) — a sealed delivery is never processed under a
+  // half-validated envelope. A lower profile never decrypts, so it keeps the
+  // public reading even when credentials were supplied.
+  const willDecrypt =
+    input.decryption.length > 0 && PROFILE_RANK[input.profile] >= PROFILE_RANK['recipient-sealed'];
+  const role = willDecrypt ? 'recipient_or_strict' : 'public';
+  const validation = validatePoeRecord(args.recordBody, { role });
+  if (!validation.valid) {
+    return assembleReport({
+      skeleton,
+      issues: validation.issues,
       verdict: 'failed',
-      exit_code: 1,
-      num_confirmations: numConfirmations,
-      ...(blockTime !== undefined ? { block_time: blockTime } : {}),
-      ...(blockSlot !== undefined ? { block_slot: blockSlot } : {}),
-      metadata_present: true,
-      validation: { valid: false, issues: validation.issues },
     });
   }
   const record = validation.record;
+  const issues = new IssueSink();
+  issues.pushAll(validation.warnings ?? []);
+  issues.pushAll(validation.info ?? []);
 
-  // 4. Confirmation-depth — a record below the reorg-safety threshold is
-  // well-formed but not yet final, so INSUFFICIENT_CONFIRMATIONS short-circuits
-  // to verdict `'pending'` (exit 3), NOT `'failed'`.
-  if (numConfirmations < threshold) {
-    return base({
+  const items = record.items ?? [];
+  const merkleCommits = record.merkle ?? [];
+
+  // Step 5 — confirmation depth. Below threshold the record is well-formed
+  // but not final: verdict `pending`, and the signature / content / decrypt
+  // steps are skipped so nothing computed against a possibly-orphaned
+  // transaction can be presented as final.
+  if (args.chainFacts.confirmationDepth < input.threshold) {
+    issues.add(
+      'INSUFFICIENT_CONFIRMATIONS',
+      [],
+      `confirmation depth ${args.chainFacts.confirmationDepth} is below the threshold ${input.threshold}; signature, content, and decryption steps did not run`,
+    );
+    return assembleReport({
+      skeleton,
+      issues: issues.sorted(),
       verdict: 'pending',
-      exit_code: 3,
-      num_confirmations: numConfirmations,
-      ...(blockTime !== undefined ? { block_time: blockTime } : {}),
-      ...(blockSlot !== undefined ? { block_slot: blockSlot } : {}),
-      metadata_present: true,
+      items: items.map(() => ({ contentCheck: 'not_checked' as const })),
+      merkle: merkleCommits.map(() => ({ contentCheck: 'not_checked' as const })),
       record,
-      validation: {
-        valid: false,
-        issues: [
-          issueOf('INSUFFICIENT_CONFIRMATIONS', [], `${numConfirmations} < threshold ${threshold}`),
-        ],
-      },
     });
   }
 
-  // 5. Build optimistic report; mutate verdict on per-check failure.
-  const initialWarnings = (validation.warnings ?? []).slice();
-  const initialInfo = (validation.info ?? []).slice();
-  const plan = planProfileSkips(profile, record);
-  initialInfo.push(...plan.skips);
+  // Profile gating: fields above the active profile are skipped with
+  // OUT_OF_PROFILE_SKIPPED (info) — the record is never invalid solely
+  // because this verifier does not implement a profile extension.
+  const plan = planProfileSkips(input.profile, record);
+  issues.pushAll(plan.skips);
 
-  // (Note: a `MERKLE_UNSUPPORTED` escalation — a verifier reading a
-  // merkle-only record without implementing Merkle — never fires here because
-  // this reference verifier always runs the Merkle subsystem at every profile.
-  // A future `core - merkle` opt-out would emit MERKLE_UNSUPPORTED at info
-  // severity when items[] also commits content, error severity otherwise.)
+  // Step 6 — record-level signatures.
+  let signatures: VerifyReport['signatures'];
+  if (plan.verifySignatures && (record.sigs?.length ?? 0) > 0) {
+    signatures = verifyRecordSignatures({
+      record,
+      cardanoNetwork: input.cardanoNetwork,
+      issues,
+    });
+  }
 
-  const reportShape: VerifyReport = {
-    tx_hash: input.txHash,
-    network: 'cardano:mainnet',
-    profile,
-    num_confirmations: numConfirmations,
-    confirmation_depth_threshold: threshold,
-    ...(blockTime !== undefined ? { block_time: blockTime } : {}),
-    ...(blockSlot !== undefined ? { block_slot: blockSlot } : {}),
-    metadata_present: true,
-    validation: composeValidation(true, undefined, initialWarnings, initialInfo),
-    record,
-    ...txDescription,
-    http_calls: httpCalls,
-    verdict: 'valid',
-    exit_code: 0,
+  // Steps 7 + 8 — content checks and sealed decryption.
+  const ctx: ContentFetchContext = {
+    fetchFn: args.fetchFn,
+    arweaveGateways: input.arweaveGateways,
+    ipfsGateways: input.ipfsGateways,
+    maxFetchBytes: input.maxFetchBytes,
+    issues,
   };
-  const report: MutableReport = { ...reportShape };
-  const uriChecks: VerifyUriCheck[] = [];
 
-  // `verifyMerkle === false` is the offline switch: it suppresses EVERY
-  // outbound URI fetch the verifier would otherwise issue past the
-  // chain/indexer resolve step — both the sealed-item ciphertext download in
-  // decryption (5b) and the Merkle leaves-list fetch (6). Offline callers
-  // (server-rendered viewers, CLI `--no-fetch`) get a report built from
-  // indexed CBOR plus any caller-supplied out-of-band bytes alone.
-  const allowUriFetch = input.verifyMerkle ?? true;
-
-  // 5a. Record-level signatures (profile >= 'signed').
-  if (plan.verifySignatures && record.sigs && record.sigs.length > 0) {
-    const sigOut: VerifyRecordSignature[] = await verifyRecordSignatures({ record, input });
-    report.record_signatures = sigOut;
-    if (recordSignaturesShouldFail(sigOut)) {
-      report.verdict = 'failed';
-      report.exit_code = 1;
+  const itemEntries: ItemReportEntry[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    if (item.enc !== undefined && item.enc !== null) {
+      if (input.decryption.length > 0 && plan.verifyDecrypt) {
+        const result = await decryptItem({
+          item,
+          itemIndex: i,
+          credentials: input.decryption,
+          outOfBandCiphertext: input.ciphertextBytes?.[i],
+          fetchContent: input.fetchContent,
+          ctx,
+        });
+        itemEntries.push({ contentCheck: result.contentCheck, decryption: result.decryption });
+      } else {
+        // Public verifier (or a profile below recipient-sealed): a sealed
+        // item's plaintext claim cannot be checked without decrypting, and
+        // the URIs hold ciphertext, not the committed plaintext.
+        itemEntries.push({ contentCheck: 'not_checked' });
+      }
+      continue;
     }
-  }
-
-  // 5b. Decryption (profile >= 'recipient-sealed' AND caller supplied keys).
-  if (plan.verifyDecrypt && input.decryption && input.decryption.length > 0) {
-    const dec = await tryDecryptions({
-      record,
-      input,
-      fetchFn,
-      httpCalls,
-      uriChecksOut: uriChecks,
-      allowUriFetch,
+    const contentCheck = await checkItemContent({
+      item,
+      itemIndex: i,
+      fetchContent: input.fetchContent,
+      ctx,
     });
-    report.item_decryptions = dec.results;
-    const decFailure = decryptionsShouldFail(dec.results);
-    if (decFailure !== null) {
-      report.verdict = 'failed';
-      report.exit_code = decFailure === 'network' ? 2 : 1;
+    itemEntries.push({ contentCheck });
+  }
+
+  const merkleOutcomes: MerkleCommitOutcome[] = [];
+  for (let i = 0; i < merkleCommits.length; i++) {
+    merkleOutcomes.push(
+      await checkMerkleCommit({
+        commit: merkleCommits[i]!,
+        commitIndex: i,
+        outOfBand: input.merkleLeaves?.[i],
+        fetchContent: input.fetchContent,
+        ctx,
+      }),
+    );
+  }
+
+  // The commitment floor resolves the dual severity of
+  // MERKLE_LEAVES_UNAVAILABLE: warning when at least one other content
+  // commitment of the record was verified in this run, error (network class,
+  // verdict `unverifiable`) when the unavailability leaves the record with no
+  // verified content commitment.
+  const anyCommitmentVerified =
+    itemEntries.some((e) => e.contentCheck === 'checked') ||
+    merkleOutcomes.some((o) => o.contentCheck === 'checked');
+  for (const outcomeEntry of merkleOutcomes) {
+    if (outcomeEntry.unavailable === undefined) continue;
+    if (outcomeEntry.unavailable.limitExceeded) {
+      issues.add(
+        'CONTENT_FETCH_LIMIT_EXCEEDED',
+        outcomeEntry.unavailable.path,
+        'a leaves-list fetch was aborted at the maxFetchBytes ceiling; the commitment is unchecked',
+      );
+      continue;
     }
+    issues.add(
+      'MERKLE_LEAVES_UNAVAILABLE',
+      outcomeEntry.unavailable.path,
+      anyCommitmentVerified
+        ? 'no attributable leaves-list could be obtained; another content commitment of the record was verified'
+        : 'no attributable leaves-list could be obtained and no content commitment of the record was verified',
+      anyCommitmentVerified ? SEVERITY.MERKLE_LEAVES_UNAVAILABLE : 'error',
+    );
   }
 
-  // 6. Merkle commitments (always in `core` and above; only escalates verdict
-  // to `'failed'` on `MERKLE_ROOT_MISMATCH` / leaf-count mismatch — leaves
-  // unavailability stays at warning).
-  //
-  // Suppressed entirely when the offline switch is set (see `allowUriFetch`)
-  // so a server-rendered viewer produces a VerifyReport from indexed CBOR
-  // alone, with zero outbound fetches to Arweave/IPFS gateways. The on-record
-  // `merkle[]` data (alg, root, leaf_count, uris) survives unchanged on
-  // `report.record`; only the defence-in-depth re-root + leaf-count check is
-  // suppressed. A user-initiated client-side flow performs the same
-  // verification at click time.
-  if (allowUriFetch && Array.isArray(record.merkle) && record.merkle.length > 0) {
-    const merkle = await verifyMerkleCommitments({
-      record,
-      input,
-      fetchFn,
-      uriChecksOut: uriChecks,
-    });
-    report.merkle_checks = merkle.checks;
-    const merkleFailure = merkleChecksShouldFail(merkle.checks);
-    if (merkleFailure && report.verdict === 'valid') {
-      report.verdict = 'failed';
-      report.exit_code = 1;
-    }
-  }
-
-  if (uriChecks.length > 0) {
-    report.uri_checks = uriChecks;
-  }
-
-  return report;
+  // Step 10 — verdict + report.
+  const sorted = issues.sorted();
+  return assembleReport({
+    skeleton,
+    issues: sorted,
+    verdict: verdictFromIssues(sorted),
+    items: itemEntries,
+    merkle: merkleOutcomes.map((o) => ({ contentCheck: o.contentCheck })),
+    record,
+    signatures,
+  });
 }
 
-// ─── Internals ────────────────────────────────────────────────────────────────
+// ─── Transaction-level description ───────────────────────────────────────────
+//
+// Decode the witnesses / summary / co-published-labels view from raw tx CBOR.
+// Purely informational: a decode failure degrades to omitting the affected
+// fields and never propagates into the verdict. The label-309 record is
+// validated separately from the record-body bytes; this view only describes
+// the carrying transaction.
 
-// Decode the transaction-level description (witnesses, summary, co-published
-// metadata labels) from raw tx CBOR. This is purely informational, so a decode
-// failure must NOT propagate into the verdict — it degrades to omitting the
-// affected fields. The label-309 record is validated separately from
-// `metadataBytes`; this view only describes the carrying transaction.
-type TxDescriptionFields = Pick<VerifyReport, 'tx_witnesses' | 'tx_summary' | 'metadata_labels'>;
-function decodeTxDescription(txCbor: Uint8Array, input: VerifyTxInput): TxDescriptionFields {
-  const network = input.cardanoNetwork ?? 'mainnet';
+type TxDescriptionFields = Pick<VerifyReport, 'txWitnesses' | 'txSummary' | 'metadataLabels'>;
+
+function decodeTxDescription(
+  txCbor: Uint8Array,
+  network: 'mainnet' | 'preprod',
+): TxDescriptionFields {
   const out: { -readonly [K in keyof TxDescriptionFields]: TxDescriptionFields[K] } = {};
   let components;
   try {
@@ -400,86 +547,32 @@ function decodeTxDescription(txCbor: Uint8Array, input: VerifyTxInput): TxDescri
   } catch {
     return out;
   }
-  out.metadata_labels = components.auxMetadataLabels;
-  try {
-    out.tx_witnesses = decodeTxWitnesses(components.witnessSet, components.txBody);
-  } catch {
-    // leave tx_witnesses undefined
-  }
-  try {
-    out.tx_summary = decodeTxSummary(components.txBody, components.witnessSet, network);
-  } catch {
-    // leave tx_summary undefined
-  }
-  return out;
-}
-
-// A public hash-only PoE stays valid even when every signature entry is
-// SIGNATURE_UNSUPPORTED — the content claim does not depend on signer identity,
-// so an unverifiable algorithm is informational, not fatal. Any OTHER failure
-// (MALFORMED_SIG_COSE_SIGN1, SIGNER_KEY_UNRESOLVED, SIGNATURE_INVALID,
-// WALLET_ADDRESS_MISMATCH) fails the record.
-function recordSignaturesShouldFail(sigs: ReadonlyArray<VerifyRecordSignature>): boolean {
-  return sigs.some((s) => s.verdict === 'invalid' || s.verdict === 'unresolved');
-}
-
-// Returns null on success, 'network' for CONTENT_UNAVAILABLE / IPFS-no-gateway
-// (exit 2), or 'integrity' for any other failure (exit 1).
-function decryptionsShouldFail(
-  results: ReadonlyArray<VerifyItemDecryption>,
-): 'network' | 'integrity' | null {
-  let saw: 'network' | 'integrity' | null = null;
-  for (const d of results) {
-    if (d.verdict === 'decrypted' && d.plaintext_hash_ok !== false) continue;
-    if (d.verdict === 'content-unavailable' || d.verdict === 'ciphertext-unavailable') {
-      saw = saw === 'integrity' ? 'integrity' : 'network';
-      continue;
+  if (components.auxiliaryData !== null) {
+    try {
+      out.metadataLabels = unwrapAuxiliaryData(components.auxiliaryData).metadataLabels;
+    } catch {
+      // leave metadataLabels undefined
     }
-    saw = 'integrity';
+  } else {
+    out.metadataLabels = [];
   }
-  return saw;
-}
-
-function merkleChecksShouldFail(checks: ReadonlyArray<VerifyMerkleCheck>): boolean {
-  for (const c of checks) {
-    if (c.verdict === 'mismatch') return true;
-    // `unavailable`, `format-unsupported`, and `unsupported` are warning/
-    // info-severity — the on-chain root is structurally valid on its own, so
-    // they do NOT escalate to verdict 'failed'.
+  try {
+    out.txWitnesses = decodeTxWitnesses(components.witnessSet, components.txBody);
+  } catch {
+    // leave txWitnesses undefined
   }
-  return false;
-}
-
-function issueOf(
-  code: keyof typeof SEVERITY,
-  path: ReadonlyArray<string | number>,
-  message: string,
-): ValidationIssue {
-  return { code, path, message, severity: SEVERITY[code] };
-}
-
-function composeValidation(
-  valid: boolean,
-  issues: ReadonlyArray<ValidationIssue> | undefined,
-  warnings: ReadonlyArray<ValidationIssue>,
-  info: ReadonlyArray<ValidationIssue>,
-): VerifyReport['validation'] {
-  const out: {
-    valid: boolean;
-    issues?: ReadonlyArray<ValidationIssue>;
-    warnings?: ReadonlyArray<ValidationIssue>;
-    info?: ReadonlyArray<ValidationIssue>;
-  } = { valid };
-  if (issues !== undefined && issues.length > 0) out.issues = issues;
-  if (warnings.length > 0) out.warnings = warnings;
-  if (info.length > 0) out.info = info;
+  try {
+    out.txSummary = decodeTxSummary(components.txBody, components.witnessSet, network);
+  } catch {
+    // leave txSummary undefined
+  }
   return out;
 }
 
-// Convenience re-export so callers can map verdicts to exit codes without
-// importing the union shape.
+// Convenience so callers can map verdicts to exit codes without importing the
+// union shape.
 export function exitCodeForVerdict(report: VerifyReport): ExitCode {
-  return report.exit_code;
+  return report.exitCode;
 }
 
 export type { Verdict, ExitCode };

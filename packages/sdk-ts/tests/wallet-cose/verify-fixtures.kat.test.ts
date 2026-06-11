@@ -31,8 +31,8 @@ import {
 } from '@cardanowall/crypto-core/cose';
 import { blake2b224 } from '@cardanowall/crypto-core/hash';
 import { hexToBytes } from '@cardanowall/crypto-core/util';
-import { chunkBytes, type ChunkedBytesArray, type PoeRecord } from '@cardanowall/poe-standard';
-import { verifyRecordSignatures } from '@cardanowall/sdk-ts/verifier';
+import type { PoeRecord } from '@cardanowall/poe-standard';
+import { IssueSink, verifyRecordSignatures } from '@cardanowall/sdk-ts/verifier';
 
 import { toNormalizedSigVerdict, type NormalizedSigVerdict } from './normalized-verdict';
 
@@ -81,25 +81,21 @@ function buildRecord(coseSign1Bytes: Uint8Array, coseKeyBytes: Uint8Array): PoeR
   return {
     v: 1,
     items: [{ hashes: { 'sha2-256': new Uint8Array(32) } }],
-    sigs: [
-      {
-        cose_sign1: chunkBytes(coseSign1Bytes) as ChunkedBytesArray,
-        cose_key: chunkBytes(coseKeyBytes) as ChunkedBytesArray,
-      },
-    ],
-  };
+    sigs: [{ cose_sign1: coseSign1Bytes, cose_key: coseKeyBytes }],
+  } as unknown as PoeRecord;
 }
 
 describe.each(WALLETS)('wallet-cose KAT — %s positive fixture', (wallet) => {
   const fixture = loadJson<PositiveFixture>(`${wallet}-cose.json`);
 
-  it('verifies and projects to expected verdict', async () => {
+  it('verifies and projects to expected verdict', () => {
     const coseSign1 = hexToBytes(fixture.cose_sign1_bytes_hex);
     const coseKey = hexToBytes(fixture.cose_key_bytes_hex);
     const record = buildRecord(coseSign1, coseKey);
-    const out = await verifyRecordSignatures({
+    const out = verifyRecordSignatures({
       record,
-      input: { txHash: '0'.repeat(64), cardanoNetwork: 'mainnet' },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out).toHaveLength(1);
     expect(toNormalizedSigVerdict(out[0]!)).toEqual(fixture.expected_normalized_verdict);
@@ -145,14 +141,15 @@ const TAMPER_VARIANTS = ['tampered-address', 'missing-address', 'wrong-network-h
 describe.each(WALLETS)('wallet-cose KAT — %s tamper variants', (wallet) => {
   for (const variant of TAMPER_VARIANTS) {
     const filename = `${wallet}-cose-${variant}.json`;
-    it(`${variant} emits WALLET_ADDRESS_MISMATCH`, async () => {
+    it(`${variant} emits WALLET_ADDRESS_MISMATCH`, () => {
       const fixture = loadJson<TamperFixture>(filename);
       const coseSign1 = hexToBytes(fixture.cose_sign1_bytes_hex);
       const coseKey = hexToBytes(fixture.cose_key_bytes_hex);
       const record = buildRecord(coseSign1, coseKey);
-      const out = await verifyRecordSignatures({
+      const out = verifyRecordSignatures({
         record,
-        input: { txHash: '0'.repeat(64), cardanoNetwork: 'mainnet' },
+        cardanoNetwork: 'mainnet',
+        issues: new IssueSink(),
       });
       expect(out).toHaveLength(1);
       expect(toNormalizedSigVerdict(out[0]!)).toEqual(fixture.expected_normalized_verdict);

@@ -25,17 +25,17 @@ function okInner(status = 200, bytes = new Uint8Array([1, 2, 3])): FetchOutbound
 
 describe('matchesDenyList — IP-literal expansion', () => {
   it('exact host match', () => {
-    expect(matchesDenyList('cardanowall.com', ['cardanowall.com'])).toBe(true);
-    expect(matchesDenyList('other.com', ['cardanowall.com'])).toBe(false);
+    expect(matchesDenyList('operator.example', ['operator.example'])).toBe(true);
+    expect(matchesDenyList('other.com', ['operator.example'])).toBe(false);
   });
 
-  it('glob suffix match: *.cardanowall.com matches subdomain but not bare', () => {
-    expect(matchesDenyList('api.cardanowall.com', ['*.cardanowall.com'])).toBe(true);
-    expect(matchesDenyList('cardanowall.com', ['*.cardanowall.com'])).toBe(false);
+  it('glob suffix match: *.operator.example matches subdomain but not bare', () => {
+    expect(matchesDenyList('api.operator.example', ['*.operator.example'])).toBe(true);
+    expect(matchesDenyList('operator.example', ['*.operator.example'])).toBe(false);
   });
 
   it('case + trailing-dot tolerant', () => {
-    expect(matchesDenyList('CardanoWall.com.', ['cardanowall.com'])).toBe(true);
+    expect(matchesDenyList('Operator.Example.', ['operator.example'])).toBe(true);
   });
 
   it('IPv6 [::1] (bracket-stripped) blocked when localhost in deny', () => {
@@ -61,7 +61,7 @@ describe('matchesDenyList — IP-literal expansion', () => {
   });
 
   it('empty deny-list allows everything', () => {
-    expect(matchesDenyList('cardanowall.com', [])).toBe(false);
+    expect(matchesDenyList('operator.example', [])).toBe(false);
     expect(matchesDenyList('127.0.0.1', [])).toBe(false);
   });
 });
@@ -75,35 +75,35 @@ describe('wrapFetchOutbound — deny-host short-circuit', () => {
       durationMs: 0,
     });
     const wrapped = wrapFetchOutbound(inner as FetchOutbound, audit, {
-      denyHosts: ['cardanowall.com'],
+      denyHosts: ['operator.example'],
     });
     await expect(
-      wrapped('https://cardanowall.com/x', { method: 'GET', purpose: 'https' }),
+      wrapped('https://operator.example/x', { method: 'GET', purpose: 'https' }),
     ).rejects.toBeInstanceOf(DenyHostError);
     expect(inner).not.toHaveBeenCalled();
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({
-      url: 'https://cardanowall.com/x',
+      url: 'https://operator.example/x',
       method: 'GET',
-      status: 0,
+      status: null,
       bytes: 0,
-      duration_ms: 0,
+      durationMs: 0,
       purpose: 'https',
     });
   });
 
   it('attaches code SERVICE_INDEPENDENCE_VIOLATION + host + url', async () => {
     const audit: HttpCallRecord[] = [];
-    const wrapped = wrapFetchOutbound(okInner(), audit, { denyHosts: ['cardanowall.com'] });
+    const wrapped = wrapFetchOutbound(okInner(), audit, { denyHosts: ['operator.example'] });
     try {
-      await wrapped('https://cardanowall.com/secret', { method: 'GET', purpose: 'https' });
+      await wrapped('https://operator.example/secret', { method: 'GET', purpose: 'https' });
       throw new Error('expected throw');
     } catch (e) {
       expect(e).toBeInstanceOf(DenyHostError);
       const err = e as DenyHostError;
       expect(err.code).toBe('SERVICE_INDEPENDENCE_VIOLATION');
-      expect(err.host).toBe('cardanowall.com');
-      expect(err.url).toBe('https://cardanowall.com/secret');
+      expect(err.host).toBe('operator.example');
+      expect(err.url).toBe('https://operator.example/secret');
     }
   });
 });
@@ -120,10 +120,10 @@ describe('wrapFetchOutbound — audit row shape', () => {
       method: 'GET',
       status: 200,
       bytes: 4,
-      duration_ms: expect.any(Number),
+      durationMs: expect.any(Number),
       purpose: 'arweave',
     });
-    expect(audit[0]!.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(audit[0]!.durationMs).toBeGreaterThanOrEqual(0);
   });
 
   it('multiple calls preserve FIFO order', async () => {
@@ -152,9 +152,9 @@ describe('wrapFetchOutbound — audit on errored fetch', () => {
       wrapped('https://example.com/x', { method: 'GET', purpose: 'cardano' }),
     ).rejects.toBe(original);
     expect(audit).toHaveLength(1);
-    expect(audit[0]!.status).toBe(0);
+    expect(audit[0]!.status).toBeNull();
     expect(audit[0]!.bytes).toBe(0);
-    expect(audit[0]!.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(audit[0]!.durationMs).toBeGreaterThanOrEqual(0);
   });
 });
 
@@ -180,9 +180,9 @@ describe('wrapFetchOutbound — protocol allowlist', () => {
     }
     expect(inner).not.toHaveBeenCalled();
     expect(audit).toHaveLength(1);
-    expect(audit[0]!.status).toBe(0);
+    expect(audit[0]!.status).toBeNull();
     expect(audit[0]!.bytes).toBe(0);
-    expect(audit[0]!.duration_ms).toBe(0);
+    expect(audit[0]!.durationMs).toBe(0);
   });
 });
 
@@ -338,7 +338,7 @@ describe('wrapFetchOutbound — retry policy', () => {
       expect(err.lastError).toBe(timeoutErr);
       expect(err.attempts).toBe(4);
       expect(audit).toHaveLength(4);
-      expect(audit.every((a) => a.status === 0)).toBe(true);
+      expect(audit.every((a) => a.status === null)).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -394,11 +394,11 @@ describe('wrapFetchOutbound — retry policy', () => {
     const audit: HttpCallRecord[] = [];
     const inner = vi.fn<FetchOutbound>();
     const wrapped = wrapFetchOutbound(inner as FetchOutbound, audit, {
-      denyHosts: ['cardanowall.com'],
+      denyHosts: ['operator.example'],
       retries: 3,
     });
     await expect(
-      wrapped('https://cardanowall.com/x', { method: 'GET', purpose: 'https' }),
+      wrapped('https://operator.example/x', { method: 'GET', purpose: 'https' }),
     ).rejects.toBeInstanceOf(DenyHostError);
     expect(inner).not.toHaveBeenCalled();
     expect(audit).toHaveLength(1);
@@ -505,6 +505,58 @@ describe('defaultFetchOutbound', () => {
     expect(Array.from(result.bytes)).toEqual([10, 20, 30, 40]);
   });
 
+  it('never follows redirects: a 302 surfaces as a non-2xx result from a single fetch', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/internal' } }),
+      );
+    const result = await defaultFetchOutbound('https://gw.example/blob', {
+      method: 'GET',
+      purpose: 'arweave',
+    });
+    // Exactly one request: the Location target is never contacted, because
+    // the redirect policy is manual and the 3xx is returned as-is.
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect((fetchSpy.mock.calls[0]![1] as RequestInit).redirect).toBe('manual');
+    expect(result.status).toBe(302);
+  });
+
+  it("treats the browser's opaqueredirect (status 0, unreadable) as a transport failure", async () => {
+    const opaque = {
+      type: 'opaqueredirect',
+      status: 0,
+      headers: new Headers(),
+      body: null,
+    } as unknown as Response;
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(opaque);
+    await expect(
+      defaultFetchOutbound('https://gw.example/blob', { method: 'GET', purpose: 'arweave' }),
+    ).rejects.toThrow(/opaqueredirect/);
+  });
+
+  it('audit trail: readable 3xx records its real status, opaqueredirect records null', async () => {
+    const audit: HttpCallRecord[] = [];
+    const wrapped = wrapFetchOutbound(defaultFetchOutbound, audit);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(null, { status: 307, headers: { location: 'https://elsewhere.example/' } }),
+    );
+    const r = await wrapped('https://gw.example/a', { method: 'GET', purpose: 'arweave' });
+    expect(r.status).toBe(307);
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      type: 'opaqueredirect',
+      status: 0,
+      headers: new Headers(),
+      body: null,
+    } as unknown as Response);
+    await expect(
+      wrapped('https://gw.example/b', { method: 'GET', purpose: 'arweave' }),
+    ).rejects.toThrow(/opaqueredirect/);
+
+    expect(audit.map((a) => a.status)).toEqual([307, null]);
+  });
+
   it('honours an exactly-at-cap body (boundary: total === maxBytes is allowed)', async () => {
     const payload = new Uint8Array(1024).fill(7);
     const body = new ReadableStream<Uint8Array>({
@@ -545,6 +597,6 @@ describe('fetchOutbound (high-level)', () => {
     ).rejects.toThrow(/fetchWebhook/);
     expect(audit).toHaveLength(1);
     expect(audit[0]?.purpose).toBe('webhook');
-    expect(audit[0]?.status).toBe(0);
+    expect(audit[0]?.status).toBeNull();
   });
 });

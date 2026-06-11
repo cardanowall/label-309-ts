@@ -1,17 +1,30 @@
-// Position-aware CBOR walker for byte-faithful label-309 metadata extraction.
+// Position-aware CBOR walker for byte-faithful transaction dissection.
 //
-// The verifier MUST fetch raw transaction CBOR and extract the label-309
-// value VERBATIM (not via decode-then-re-encode). A
-// re-encode pass would silently launder a non-conformant on-chain record into
-// a conformant one because cbor2's decoder normalises non-canonical input
-// (sorts map keys, collapses indefinite-length encodings, etc.); the
-// structural validator's canonical-CBOR check (`decodeCanonicalCbor` +
-// cbor2 CDE options) only catches the violation if it sees the producer's
-// original bytes.
+// The verifier MUST fetch raw transaction CBOR and slice its components
+// VERBATIM (never decode-then-re-encode). A re-encode pass would silently
+// launder a non-conformant on-chain record into a conformant one — a CBOR
+// decoder normalises non-canonical input (sorts map keys, collapses
+// indefinite-length encodings) — and would break both integrity bindings,
+// which are defined over the bytes exactly as fetched:
 //
-// Pure stdlib walker (no `cbor2` dependency for the slicing path). Rejects
-// indefinite-length encodings, which canonical CBOR forbids; the structural
-// validator downstream performs the rest of the deterministic-encoding checks.
+//   * blake2b-256(transaction-body bytes)  == the transaction id;
+//   * blake2b-256(auxiliary-data bytes)    == the body's auxiliary_data_hash.
+//
+// This module owns three byte-level concerns:
+//
+//   * `sliceTxComponents`        — split a transaction into the exact body /
+//                                  witness-set / auxiliary-data byte slices.
+//   * `unwrapAuxiliaryData`      — unwrap auxiliary-data bytes down to the
+//                                  raw label-309 value, accepting all three
+//                                  Conway-era envelope forms and dispatching
+//                                  on the top-level CBOR type and tag ONLY
+//                                  (never on map-key inspection).
+//   * `auxiliaryDataHashFromTxBody` — read the body's `auxiliary_data_hash`
+//                                  field (key 7) for the integrity binding.
+//
+// Chunk-array reassembly of the label-309 value is NOT here: it is the
+// shared transport step `reassembleLabel309Value` in
+// `@cardanowall/poe-standard/carriage`.
 
 interface CborHead {
   readonly mt: number;
@@ -112,49 +125,43 @@ function skipCborItem(bytes: Uint8Array, pos: number): number {
   }
 }
 
-// CBOR tag 259 wraps post-Alonzo auxiliary_data (CIP-29).
+// CBOR tag 259 wraps the keyed-map auxiliary-data form (Conway).
 const CARDANO_AUX_DATA_TAG = 259;
 const POE_LABEL = 309;
+const AUX_DATA_HASH_BODY_KEY = 7;
 
 /**
  * Byte-faithful components of a Cardano transaction, located by walking the
  * tx CBOR without a decode-then-re-encode pass.
  *
- * `txBody` and `witnessSet` are EXACT on-chain byte slices: `blake2b256(txBody)`
- * equals the transaction hash, and the witness set decodes to the vkey
- * witnesses that authorised the transaction. The slices are produced by the
- * same position-aware walk that finds label 309, so they never round-trip
- * through a CBOR re-encoder.
- *
- * `label309` is the reassembled label-309 value (chunked-bytes concatenated;
- * see `reassembleLabel309Value`), `null` when auxiliary_data is null/undefined
- * or label 309 is absent. `auxMetadataLabels` is the ascending-sorted list of
- * every integer key in the auxiliary metadata map (`[]` when aux is null).
+ * Every field is an EXACT on-chain byte slice: `blake2b256(txBody)` equals the
+ * transaction id, `blake2b256(auxiliaryData)` equals the body's
+ * `auxiliary_data_hash`, and the witness set decodes to the vkey witnesses
+ * that authorised the transaction. `auxiliaryData` is `null` when the
+ * transaction carries none (CBOR null/undefined at the auxiliary-data
+ * position).
  */
 export interface TxComponents {
-  readonly label309: Uint8Array | null;
   readonly txBody: Uint8Array;
   readonly witnessSet: Uint8Array;
-  readonly auxMetadataLabels: number[];
+  readonly auxiliaryData: Uint8Array | null;
 }
 
 /**
  * Walk the transaction CBOR once and return its byte-faithful components.
- *
- * Throws `RangeError("MALFORMED_CBOR: …")` on structural violations. The body
- * and witness-set slices are the producer's ORIGINAL bytes; `label309` carries
- * the same byte-faithful guarantee `sliceLabel309Value` documents (no
- * decode-then-re-encode, so non-canonical encodings reach the structural
- * validator unchanged).
+ * Accepts the four-element post-Alonzo shape `[body, witness_set, is_valid,
+ * auxiliary_data]` and the three-element pre-Alonzo shape
+ * `[body, witness_set, auxiliary_data]`. Throws
+ * `RangeError("MALFORMED_CBOR: …")` on structural violations.
  */
 export function sliceTxComponents(txCbor: Uint8Array): TxComponents {
   const txHead = readHead(txCbor, 0);
   if (txHead.mt !== 4) {
     throw new RangeError(`MALFORMED_CBOR: tx CBOR is not a CBOR array (major type ${txHead.mt})`);
   }
-  if (txHead.valueU64 < 4) {
+  if (txHead.valueU64 !== 3 && txHead.valueU64 !== 4) {
     throw new RangeError(
-      `MALFORMED_CBOR: tx CBOR array has ${txHead.valueU64} elements; expected >= 4 (post-Conway: [body, witness_set, is_valid, auxiliary_data])`,
+      `MALFORMED_CBOR: tx CBOR array has ${txHead.valueU64} elements; expected 3 ([body, witness_set, auxiliary_data]) or 4 ([body, witness_set, is_valid, auxiliary_data])`,
     );
   }
 
@@ -162,179 +169,160 @@ export function sliceTxComponents(txCbor: Uint8Array): TxComponents {
   const bodyEnd = skipCborItem(txCbor, bodyStart);
   const witnessSetStart = bodyEnd;
   const witnessSetEnd = skipCborItem(txCbor, witnessSetStart);
-  const pos = skipCborItem(txCbor, witnessSetEnd); // skip is_valid
+  const auxStart = txHead.valueU64 === 4 ? skipCborItem(txCbor, witnessSetEnd) : witnessSetEnd; // skip is_valid in the four-element shape
 
   const txBody = txCbor.slice(bodyStart, bodyEnd);
   const witnessSet = txCbor.slice(witnessSetStart, witnessSetEnd);
 
-  if (pos >= txCbor.length) {
+  if (auxStart >= txCbor.length) {
     throw new RangeError('MALFORMED_CBOR: truncated tx (auxiliary_data missing)');
   }
-  const auxFirstByte = txCbor[pos]!;
+  const auxFirstByte = txCbor[auxStart]!;
   if (auxFirstByte === 0xf6 || auxFirstByte === 0xf7) {
-    return { label309: null, txBody, witnessSet, auxMetadataLabels: [] };
+    return { txBody, witnessSet, auxiliaryData: null };
   }
+  const auxEnd = skipCborItem(txCbor, auxStart);
+  return { txBody, witnessSet, auxiliaryData: txCbor.slice(auxStart, auxEnd) };
+}
 
-  let auxMapPos = pos;
-  const auxHead = readHead(txCbor, pos);
-  if (auxHead.mt === 6) {
-    if (auxHead.valueU64 !== CARDANO_AUX_DATA_TAG) {
+/**
+ * The unwrapped view of one auxiliary-data value: the raw label-309 value
+ * bytes (the transport chunk array exactly as carried; `null` when the
+ * metadata carries no label-309 entry) plus the ascending-sorted list of
+ * every metadata label present.
+ */
+export interface UnwrappedAuxiliaryData {
+  readonly label309: Uint8Array | null;
+  readonly metadataLabels: ReadonlyArray<number>;
+}
+
+/**
+ * Unwrap auxiliary-data bytes down to the label-309 value. All three
+ * Conway-era envelope forms are accepted, dispatching PURELY on the top-level
+ * CBOR type and tag:
+ *
+ *   * tag 259            → keyed map; the metadata map sits under integer key 0;
+ *   * untagged array     → the two-element `[ transaction_metadata,
+ *                          auxiliary_scripts ]` form; the metadata map is
+ *                          element 0;
+ *   * untagged map       → ALWAYS the metadata map itself.
+ *
+ * Map keys are never inspected to guess the shape — a metadata map is keyed
+ * by integer labels, so any key-sniffing heuristic would silently mis-parse
+ * legitimate metadata (e.g. a metadata map whose only label is 0). Any other
+ * top-level shape, and any tag other than 259, throws
+ * `RangeError("MALFORMED_CBOR: …")`.
+ *
+ * A tag-259 map with no key 0, and a metadata map with no entry under label
+ * 309, are well-formed auxiliary data that simply carry no PoE record —
+ * `label309` is `null` and the caller emits METADATA_NOT_FOUND.
+ */
+export function unwrapAuxiliaryData(auxBytes: Uint8Array): UnwrappedAuxiliaryData {
+  const head = readHead(auxBytes, 0);
+  let metadataMapPos: number | null;
+
+  if (head.mt === 6) {
+    if (head.valueU64 !== CARDANO_AUX_DATA_TAG) {
       throw new RangeError(
-        `MALFORMED_CBOR: auxiliary_data carries unexpected CBOR tag ${auxHead.valueU64}; expected ${CARDANO_AUX_DATA_TAG} or bare map`,
+        `MALFORMED_CBOR: auxiliary data carries CBOR tag ${head.valueU64}; only tag ${CARDANO_AUX_DATA_TAG} is an auxiliary-data envelope`,
       );
     }
-    auxMapPos = auxHead.payloadStart;
-  }
-
-  const mapHead = readHead(txCbor, auxMapPos);
-  if (mapHead.mt !== 5) {
+    const inner = readHead(auxBytes, head.payloadStart);
+    if (inner.mt !== 5) {
+      throw new RangeError(
+        `MALFORMED_CBOR: tag-${CARDANO_AUX_DATA_TAG} auxiliary data must wrap a map (major type ${inner.mt})`,
+      );
+    }
+    // Find integer key 0 (the transaction_metadata entry); other keys carry
+    // scripts and are skipped without inspection.
+    metadataMapPos = null;
+    let entryPos = inner.payloadStart;
+    for (let i = 0; i < inner.valueU64; i++) {
+      const keyHead = readHead(auxBytes, entryPos);
+      const valuePos = skipCborItem(auxBytes, entryPos);
+      if (keyHead.mt === 0 && keyHead.valueU64 === 0) {
+        metadataMapPos = valuePos;
+      }
+      entryPos = skipCborItem(auxBytes, valuePos);
+    }
+  } else if (head.mt === 4) {
+    if (head.valueU64 !== 2) {
+      throw new RangeError(
+        `MALFORMED_CBOR: untagged auxiliary-data array must be the two-element [transaction_metadata, auxiliary_scripts] form (got ${head.valueU64} elements)`,
+      );
+    }
+    metadataMapPos = head.payloadStart;
+  } else if (head.mt === 5) {
+    // An untagged map is always the metadata map itself.
+    metadataMapPos = 0;
+  } else {
     throw new RangeError(
-      `MALFORMED_CBOR: auxiliary_data is not a CBOR map (major type ${mapHead.mt})`,
+      `MALFORMED_CBOR: auxiliary data has major type ${head.mt}; expected map, array, or tag ${CARDANO_AUX_DATA_TAG}`,
     );
   }
 
-  // Disambiguate the tagged (post-Alonzo, `{0 → metadata, 1 → ...}`) and bare
-  // (pre-Alonzo, the map IS the metadata map directly) auxiliary_data shapes
-  // by walking the map keys: if any int key in `{0,1,2,3}` is present, treat
-  // it as the post-Alonzo shape and find key 0; else treat the whole map as
-  // metadata directly. Modern Cardano txs (Conway+) are always tag-259
-  // wrapped, but synthetic test fixtures often emit the post-Alonzo shape
-  // bare and we want to handle both without forcing producers to add the tag.
-  let metadataMapPos: number | null;
-  {
-    let entryPos = mapHead.payloadStart;
-    let sawAuxKey = false;
-    let foundMetadataAt: number | null = null;
-    for (let i = 0; i < mapHead.valueU64; i++) {
-      const keyHead = readHead(txCbor, entryPos);
-      if (keyHead.mt === 0 && keyHead.valueU64 <= 3) {
-        sawAuxKey = true;
-        if (keyHead.valueU64 === 0) {
-          foundMetadataAt = keyHead.payloadStart;
-        }
-      }
-      entryPos = skipCborItem(txCbor, entryPos); // skip key
-      entryPos = skipCborItem(txCbor, entryPos); // skip value
-    }
-    if (sawAuxKey || auxHead.mt === 6) {
-      metadataMapPos = foundMetadataAt;
-    } else {
-      // Bare pre-Alonzo metadata map.
-      metadataMapPos = auxMapPos;
-    }
-  }
-
   if (metadataMapPos === null) {
-    return { label309: null, txBody, witnessSet, auxMetadataLabels: [] };
+    return { label309: null, metadataLabels: [] };
   }
 
-  const metaHead = readHead(txCbor, metadataMapPos);
+  const metaHead = readHead(auxBytes, metadataMapPos);
   if (metaHead.mt !== 5) {
-    throw new RangeError(`MALFORMED_CBOR: metadata is not a CBOR map (major type ${metaHead.mt})`);
+    throw new RangeError(
+      `MALFORMED_CBOR: transaction metadata is not a CBOR map (major type ${metaHead.mt})`,
+    );
   }
   const labels: number[] = [];
   let label309: Uint8Array | null = null;
   let pairPos = metaHead.payloadStart;
   for (let i = 0; i < metaHead.valueU64; i++) {
-    const keyHead = readHead(txCbor, pairPos);
-    const keyVal = decodeIntKey(keyHead);
+    const keyHead = readHead(auxBytes, pairPos);
+    // The ledger pins metadata labels as unsigned integers; any other key
+    // type cannot appear in on-chain transaction metadata.
+    if (keyHead.mt !== 0) {
+      throw new RangeError(
+        `MALFORMED_CBOR: metadata map key has major type ${keyHead.mt}; metadata labels are unsigned integers`,
+      );
+    }
+    const keyVal = keyHead.valueU64;
     labels.push(keyVal);
-    const valueStart = skipCborItem(txCbor, pairPos);
-    const valueEnd = skipCborItem(txCbor, valueStart);
+    const valueStart = skipCborItem(auxBytes, pairPos);
+    const valueEnd = skipCborItem(auxBytes, valueStart);
     if (keyVal === POE_LABEL) {
-      label309 = reassembleLabel309Value(txCbor, valueStart, valueEnd);
+      label309 = auxBytes.slice(valueStart, valueEnd);
     }
     pairPos = valueEnd;
   }
   labels.sort((a, b) => a - b);
-  return { label309, txBody, witnessSet, auxMetadataLabels: labels };
+  return { label309, metadataLabels: labels };
 }
 
 /**
- * Extract the byte slice corresponding to the value under metadata label 309.
- * Returns `null` when auxiliary_data is null/undefined or when label 309 is
- * absent. Throws `RangeError("MALFORMED_CBOR: …")` on structural violations.
- *
- * Returns the producer's ORIGINAL on-chain bytes — no decode-then-re-encode
- * pass. The structural validator MUST receive these bytes verbatim so
- * non-canonical encodings surface as `MALFORMED_CBOR` rather than being
- * silently laundered.
+ * Read the transaction body's `auxiliary_data_hash` (body-map key 7) as an
+ * exact byte slice; `null` when the body carries no key 7. Throws
+ * `RangeError("MALFORMED_CBOR: …")` when the body is not a CBOR map.
  */
-export function sliceLabel309Value(txCbor: Uint8Array): Uint8Array | null {
-  return sliceTxComponents(txCbor).label309;
-}
-
-/**
- * Cardano caps individual metadata `bstr` / `tstr` values at 64 bytes
- * (Cardano metadata spec). A Label 309 PoE record's
- * canonical CBOR is typically several hundred bytes, so the producer emits
- * it as a `bytes-chunk-array` — `[ bstr .size (1..64), … ]` — at the
- * label-309 value position. The verifier MUST byte-concatenate the chunks
- * IN ORDER before passing the result to `validatePoeRecord`, otherwise
- * the canonical-CBOR decoder sees an outer CBOR array of byte strings
- * instead of the inner CBOR map and the record fails with
- * `SCHEMA_TYPE_MISMATCH` / `MALFORMED_CBOR`.
- *
- * Small records (≤ 64 bytes) MAY be emitted as a single `bstr` directly.
- * For backwards-compat we also accept a bare CBOR map value — older
- * producers and small synthetic fixtures use that shape.
- *
- * Returns the canonical-CBOR PoE record body (a `bstr`-free, map-rooted
- * byte sequence) ready for validation.
- */
-function reassembleLabel309Value(
-  txCbor: Uint8Array,
-  valueStart: number,
-  valueEnd: number,
-): Uint8Array {
-  const head = readHead(txCbor, valueStart);
-  // Major type 4 = array → assume bytes-chunk-array; concatenate inner bstr items.
-  if (head.mt === 4) {
-    const out: Uint8Array[] = [];
-    let totalLen = 0;
-    let chunkPos = head.payloadStart;
-    for (let i = 0; i < head.valueU64; i++) {
-      const chunkHead = readHead(txCbor, chunkPos);
-      if (chunkHead.mt !== 2) {
+export function auxiliaryDataHashFromTxBody(txBody: Uint8Array): Uint8Array | null {
+  const head = readHead(txBody, 0);
+  if (head.mt !== 5) {
+    throw new RangeError(
+      `MALFORMED_CBOR: transaction body is not a CBOR map (major type ${head.mt})`,
+    );
+  }
+  let pairPos = head.payloadStart;
+  for (let i = 0; i < head.valueU64; i++) {
+    const keyHead = readHead(txBody, pairPos);
+    const valueStart = skipCborItem(txBody, pairPos);
+    const valueEnd = skipCborItem(txBody, valueStart);
+    if (keyHead.mt === 0 && keyHead.valueU64 === AUX_DATA_HASH_BODY_KEY) {
+      const valueHead = readHead(txBody, valueStart);
+      if (valueHead.mt !== 2) {
         throw new RangeError(
-          `MALFORMED_CBOR: label-309 value is a CBOR array but element ${i} has major type ${chunkHead.mt}; expected byte string (chunked-bytes shape)`,
+          `MALFORMED_CBOR: auxiliary_data_hash (body key 7) is not a byte string (major type ${valueHead.mt})`,
         );
       }
-      const chunkValueStart = chunkHead.payloadStart;
-      const chunkValueEnd = chunkValueStart + chunkHead.valueU64;
-      out.push(txCbor.slice(chunkValueStart, chunkValueEnd));
-      totalLen += chunkHead.valueU64;
-      chunkPos = chunkValueEnd;
+      return txBody.slice(valueHead.payloadStart, valueEnd);
     }
-    const concat = new Uint8Array(totalLen);
-    let offset = 0;
-    for (const c of out) {
-      concat.set(c, offset);
-      offset += c.length;
-    }
-    return concat;
+    pairPos = valueEnd;
   }
-  // Major type 2 = single bstr value. The bstr CONTENTS are the canonical
-  // CBOR record body — strip the bstr head so decodeCanonicalCbor sees the
-  // map directly.
-  if (head.mt === 2) {
-    return txCbor.slice(head.payloadStart, head.payloadStart + head.valueU64);
-  }
-  // Major type 5 = map directly (bare-canonical shape; some synthetic
-  // fixtures emit this when the record fits in one chunk and the producer
-  // chose not to box it in a bstr). Pass through unchanged.
-  if (head.mt === 5) {
-    return txCbor.slice(valueStart, valueEnd);
-  }
-  throw new RangeError(
-    `MALFORMED_CBOR: label-309 value has major type ${head.mt}; expected array (chunked), byte string, or map`,
-  );
-}
-
-function decodeIntKey(h: CborHead): number {
-  if (h.mt === 0) return h.valueU64;
-  if (h.mt === 1) return -1 - h.valueU64;
-  throw new RangeError(
-    `MALFORMED_CBOR: metadata map key has major type ${h.mt}; expected unsigned integer`,
-  );
+  return null;
 }

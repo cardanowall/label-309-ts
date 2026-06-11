@@ -8,12 +8,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import { describe, expect, it } from 'vitest';
 
 import { x25519PublicKey } from '../kem/x25519';
 
 import { eciesSealedPoeTrialDecrypt, eciesSealedPoeUnwrap } from './unwrap';
-import { eciesSealedPoeWrap, type SealedEnvelope, type X25519Slot } from './wrap';
+import { eciesSealedPoeWrap, SEALED_POE_AEAD, type SealedEnvelope, type X25519Slot } from './wrap';
+import type { ItemHashes } from './transcript';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(here, '../../tests/fixtures/sealed-poe');
@@ -24,7 +26,7 @@ interface SlotHex {
 }
 interface EnvelopeHex {
   scheme: 1;
-  aead: 'xchacha20-poly1305';
+  aead: string;
   kem: 'x25519';
   nonce_hex: string;
   slots: SlotHex[];
@@ -34,6 +36,7 @@ interface MultiPrivCorpus {
   vector: {
     name: string;
     recipient_privs_hex: string[];
+    hashes: Record<string, string>;
     envelope: EnvelopeHex;
     ciphertext_hex: string;
     expected_plaintext_hex: string;
@@ -59,12 +62,16 @@ function envelopeFromHex(env: EnvelopeHex): SealedEnvelope {
   }));
   return {
     scheme: env.scheme,
-    aead: env.aead,
+    aead: env.aead as typeof SEALED_POE_AEAD,
     kem: env.kem,
     nonce: hexToBytes(env.nonce_hex),
     slots,
     slots_mac: hexToBytes(env.slots_mac_hex),
   };
+}
+
+function hashesFromHex(hashes: Record<string, string>): ItemHashes {
+  return Object.fromEntries(Object.entries(hashes).map(([alg, hex]) => [alg, hexToBytes(hex)]));
 }
 
 function loadMultipriv(filename: string): MultiPrivCorpus {
@@ -82,6 +89,7 @@ describe('eciesSealedPoeTrialDecrypt — multi-priv current-match', () => {
     const privsAttemptedOut = { count: 0 };
     const res = eciesSealedPoeTrialDecrypt({
       envelope,
+      hashes: hashesFromHex(vector.hashes),
       recipientSecretKeys: privs,
       _slotsAttemptedOut: slotsAttemptedOut,
       _privsAttemptedOut: privsAttemptedOut,
@@ -96,9 +104,15 @@ describe('eciesSealedPoeTrialDecrypt — multi-priv current-match', () => {
   });
 
   it('parity: recovered CEK matches the one eciesSealedPoeUnwrap returns when plaintext-decrypting', () => {
-    const trialRes = eciesSealedPoeTrialDecrypt({ envelope, recipientSecretKeys: privs });
+    const hashes = hashesFromHex(vector.hashes);
+    const trialRes = eciesSealedPoeTrialDecrypt({ envelope, hashes, recipientSecretKeys: privs });
     const ciphertext = hexToBytes(vector.ciphertext_hex);
-    const unwrapRes = eciesSealedPoeUnwrap({ envelope, ciphertext, recipientSecretKeys: privs });
+    const unwrapRes = eciesSealedPoeUnwrap({
+      envelope,
+      ciphertext,
+      hashes,
+      recipientSecretKeys: privs,
+    });
     expect(unwrapRes.matched).toBe(true);
     expect(trialRes.kind).toBe('match');
     // Indirect parity: both recover the same plaintext via the same CEK; we
@@ -114,11 +128,12 @@ describe('eciesSealedPoeTrialDecrypt — multi-priv archived-match', () => {
   const envelope = envelopeFromHex(vector.envelope);
   const privs = vector.recipient_privs_hex.map(hexToBytes);
 
-  it('matches via archived priv at index 2 with constant-time-N inner loops', () => {
+  it('matches via archived priv at index 2 with constant-across-slots inner loops', () => {
     const slotsAttemptedOut = { count: 0, perPrivCounts: [] as number[] };
     const privsAttemptedOut = { count: 0 };
     const res = eciesSealedPoeTrialDecrypt({
       envelope,
+      hashes: hashesFromHex(vector.hashes),
       recipientSecretKeys: privs,
       _slotsAttemptedOut: slotsAttemptedOut,
       _privsAttemptedOut: privsAttemptedOut,
@@ -139,16 +154,17 @@ describe('eciesSealedPoeTrialDecrypt — multi-priv no-match', () => {
   const envelope = envelopeFromHex(vector.envelope);
   const privs = vector.recipient_privs_hex.map(hexToBytes);
 
-  it('returns kind="no_aead_pass" after exhausting all privs', () => {
+  it('returns kind="no_match" after exhausting all privs', () => {
     const slotsAttemptedOut = { count: 0, perPrivCounts: [] as number[] };
     const privsAttemptedOut = { count: 0 };
     const res = eciesSealedPoeTrialDecrypt({
       envelope,
+      hashes: hashesFromHex(vector.hashes),
       recipientSecretKeys: privs,
       _slotsAttemptedOut: slotsAttemptedOut,
       _privsAttemptedOut: privsAttemptedOut,
     });
-    expect(res.kind).toBe('no_aead_pass');
+    expect(res.kind).toBe('no_match');
     expect(privsAttemptedOut.count).toBe(vector.expected_outer_loop_count);
   });
 });
@@ -164,6 +180,7 @@ describe('eciesSealedPoeTrialDecrypt — N=32 K=10 worst case (320 inner attempt
     const privsAttemptedOut = { count: 0 };
     const res = eciesSealedPoeTrialDecrypt({
       envelope,
+      hashes: hashesFromHex(vector.hashes),
       recipientSecretKeys: privs,
       _slotsAttemptedOut: slotsAttemptedOut,
       _privsAttemptedOut: privsAttemptedOut,
@@ -177,13 +194,13 @@ describe('eciesSealedPoeTrialDecrypt — N=32 K=10 worst case (320 inner attempt
   });
 });
 
-describe('eciesSealedPoeTrialDecrypt — constant-time-N matrix', () => {
+describe('eciesSealedPoeTrialDecrypt — constant-across-slots matrix', () => {
   const SCENARIOS = [
     { filename: 'unwrap-multipriv-ac9-priv0-slot0.json', kind: 'match' as const },
     { filename: 'unwrap-multipriv-ac9-priv0-slot31.json', kind: 'match' as const },
     { filename: 'unwrap-multipriv-ac9-priv4-slot0.json', kind: 'match' as const },
     { filename: 'unwrap-multipriv-ac9-priv4-slot31.json', kind: 'match' as const },
-    { filename: 'unwrap-multipriv-ac9-no-match.json', kind: 'no_aead_pass' as const },
+    { filename: 'unwrap-multipriv-ac9-no-match.json', kind: 'no_match' as const },
   ];
 
   for (const scenario of SCENARIOS) {
@@ -195,25 +212,28 @@ describe('eciesSealedPoeTrialDecrypt — constant-time-N matrix', () => {
       const slotsAttemptedOut = { count: 0, perPrivCounts: [] as number[] };
       const res = eciesSealedPoeTrialDecrypt({
         envelope,
+        hashes: hashesFromHex(vector.hashes),
         recipientSecretKeys: privs,
         _slotsAttemptedOut: slotsAttemptedOut,
       });
       expect(res.kind).toBe(scenario.kind);
-      // Constant-time-N invariant: every entered priv ran all N=32 slots.
+      // Constant-across-slots invariant: every entered priv ran all N=32 slots.
       for (const c of slotsAttemptedOut.perPrivCounts) expect(c).toBe(32);
     });
   }
 });
 
-describe('eciesSealedPoeTrialDecrypt — forged slots_mac surfaces aead_pass_no_mac_match', () => {
-  it('returns kind="aead_pass_no_mac_match" when a slot opens but slots_mac is tampered', () => {
-    // Build a real single-slot envelope, then flip a byte of slots_mac to
-    // simulate "honest slot, forged MAC". The slot will still open (AEAD-pass)
-    // but slots_mac compareCt will fail under all privs.
+describe('eciesSealedPoeTrialDecrypt — forged slots_mac is not a match', () => {
+  it('returns kind="no_match" when a slot opens but slots_mac is tampered', () => {
+    // Build a real single-slot envelope, then flip a byte of slots_mac. The
+    // slot still wrap-opens, but per-slot acceptance folds the MAC, so the
+    // record is simply not-mine — never a distinguishable middle outcome.
     const recipientPriv = new Uint8Array(32).fill(0x7a);
-    // Derive pub from priv via the wrap helper's intent: easier to just wrap.
+    const plaintext = new Uint8Array(16).fill(0xab);
+    const hashes: ItemHashes = { 'sha2-256': sha256(plaintext) };
     const wrapped = eciesSealedPoeWrap({
-      plaintext: new Uint8Array(16).fill(0xab),
+      plaintext,
+      hashes,
       recipientPublicKeys: [x25519PublicKey({ secretKey: recipientPriv })],
     });
     const tamperedMac = new Uint8Array(wrapped.envelope.slots_mac);
@@ -224,19 +244,22 @@ describe('eciesSealedPoeTrialDecrypt — forged slots_mac surfaces aead_pass_no_
     };
     const res = eciesSealedPoeTrialDecrypt({
       envelope: tamperedEnvelope,
+      hashes,
       recipientSecretKeys: [recipientPriv],
     });
-    expect(res.kind).toBe('aead_pass_no_mac_match');
+    expect(res.kind).toBe('no_match');
   });
 });
 
 describe('eciesSealedPoeTrialDecrypt — pre-trial structural checks', () => {
+  const HASHES: ItemHashes = { 'sha2-256': new Uint8Array(32) };
+
   it('rejects empty recipientSecretKeys with INVALID_RECIPIENT_KEY', () => {
     const corpus = loadMultipriv('unwrap-multipriv-current-match.json');
     const envelope = envelopeFromHex(corpus.vector.envelope);
-    expect(() => eciesSealedPoeTrialDecrypt({ envelope, recipientSecretKeys: [] })).toThrowError(
-      /recipientSecretKeys MUST be a non-empty array/,
-    );
+    expect(() =>
+      eciesSealedPoeTrialDecrypt({ envelope, hashes: HASHES, recipientSecretKeys: [] }),
+    ).toThrowError(/recipientSecretKeys MUST be a non-empty array/);
   });
 
   it('rejects mismatched nonce length with NONCE_LENGTH_MISMATCH (partitioning-oracle defence)', () => {
@@ -245,7 +268,7 @@ describe('eciesSealedPoeTrialDecrypt — pre-trial structural checks', () => {
     const privs = corpus.vector.recipient_privs_hex.map(hexToBytes);
     const bad: SealedEnvelope = { ...envelope, nonce: new Uint8Array(20) };
     expect(() =>
-      eciesSealedPoeTrialDecrypt({ envelope: bad, recipientSecretKeys: privs }),
+      eciesSealedPoeTrialDecrypt({ envelope: bad, hashes: HASHES, recipientSecretKeys: privs }),
     ).toThrowError(/NONCE_LENGTH_MISMATCH|envelope\.nonce/);
   });
 });

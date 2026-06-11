@@ -1,9 +1,11 @@
+import { sha256 } from '@noble/hashes/sha2.js';
 import { describe, expect, it } from 'vitest';
 
 import { chacha20Poly1305Decrypt } from '../aead/chacha20-poly1305';
 import { hkdfSha256 } from '../kdf/hkdf';
 import { x25519Ecdh, x25519PublicKey } from '../kem/x25519';
 
+import { x25519KekSalt, type ItemHashes } from './transcript';
 import { eciesSealedPoeUnwrap } from './unwrap';
 import {
   CARDANO_POE_HKDF_INFO_KEK,
@@ -25,21 +27,22 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
+function hashesOf(plaintext: Uint8Array): ItemHashes {
+  return { 'sha2-256': sha256(plaintext) };
 }
 
 // Per-slot probe — kept test-only since the public API does not expose per-slot identity.
 // Used only by the shuffle-position property test (recipientPositions) below.
-function trialUnwrap(slot: X25519Slot, recipientPriv: Uint8Array): Uint8Array | null {
+function trialUnwrap(
+  slot: X25519Slot,
+  nonce: Uint8Array,
+  recipientPriv: Uint8Array,
+): Uint8Array | null {
   const shared = x25519Ecdh({ secretKey: recipientPriv, theirPublicKey: slot.epk });
   const recipientPub = x25519PublicKey({ secretKey: recipientPriv });
   const kek = hkdfSha256({
     ikm: shared,
-    salt: concat(slot.epk, recipientPub),
+    salt: x25519KekSalt({ nonce, epk: slot.epk, pubR: recipientPub }),
     info: CARDANO_POE_HKDF_INFO_KEK,
     length: 32,
   });
@@ -61,7 +64,7 @@ function recipientPositions(out: SealedPoeOutput, recipientPrivs: Uint8Array[]):
     const slot = out.envelope.slots[slotIdx] as X25519Slot;
     for (let r = 0; r < recipientPrivs.length; r++) {
       if (positions[r] !== -1) continue;
-      const cek = trialUnwrap(slot, recipientPrivs[r] as Uint8Array);
+      const cek = trialUnwrap(slot, out.envelope.nonce, recipientPrivs[r] as Uint8Array);
       if (cek !== null) {
         positions[r] = slotIdx;
         break;
@@ -80,12 +83,14 @@ describe('sealed-poe wrap — production-path roundtrip + shuffle property', () 
   const recipientPublicKeys = recipientPrivs.map((priv) => x25519PublicKey({ secretKey: priv }));
 
   it('every recipient priv key recovers the original plaintext', () => {
-    const plaintext = new TextEncoder().encode('AC5 roundtrip — production path');
-    const out = eciesSealedPoeWrap({ plaintext, recipientPublicKeys });
+    const plaintext = new TextEncoder().encode('roundtrip — production path');
+    const hashes = hashesOf(plaintext);
+    const out = eciesSealedPoeWrap({ plaintext, hashes, recipientPublicKeys });
     for (const priv of recipientPrivs) {
       const result = eciesSealedPoeUnwrap({
         envelope: out.envelope,
         ciphertext: out.ciphertext,
+        hashes,
         recipientSecretKey: priv,
       });
       expect(result.matched).toBe(true);
@@ -97,9 +102,10 @@ describe('sealed-poe wrap — production-path roundtrip + shuffle property', () 
 
   it('observes recipient-position permutation across N=3 production runs', () => {
     const plaintext = new TextEncoder().encode('shuffle-by-recipient-position');
+    const hashes = hashesOf(plaintext);
     const orderings = new Set<string>();
     for (let i = 0; i < 1000; i++) {
-      const out = eciesSealedPoeWrap({ plaintext, recipientPublicKeys });
+      const out = eciesSealedPoeWrap({ plaintext, hashes, recipientPublicKeys });
       const positions = recipientPositions(out, recipientPrivs);
       orderings.add(positions.join(','));
       if (orderings.size >= 4) break;
@@ -110,9 +116,10 @@ describe('sealed-poe wrap — production-path roundtrip + shuffle property', () 
   it('produces 100 distinct (nonce, slots_mac) tuples across 100 N=1 production-path runs', () => {
     const pub = recipientPublicKeys[0] as Uint8Array;
     const plaintext = new TextEncoder().encode('csprng-distinctness');
+    const hashes = hashesOf(plaintext);
     const seen = new Set<string>();
     for (let i = 0; i < 100; i++) {
-      const out = eciesSealedPoeWrap({ plaintext, recipientPublicKeys: [pub] });
+      const out = eciesSealedPoeWrap({ plaintext, hashes, recipientPublicKeys: [pub] });
       seen.add(`${bytesToHex(out.envelope.nonce)}|${bytesToHex(out.envelope.slots_mac)}`);
     }
     expect(seen.size).toBe(100);

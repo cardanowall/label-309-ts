@@ -9,8 +9,8 @@ import { describe, expect, it } from 'vitest';
 
 import { EciesSealedPoeError } from './errors';
 import { eciesSealedPoeUnwrap } from './unwrap';
-import { MAX_DECODED_ENVELOPE_BYTES, MAX_SLOTS } from './transcript';
-import { type SealedEnvelope, type X25519Slot } from './wrap';
+import { MAX_DECODED_ENVELOPE_BYTES, MAX_SLOTS, type ItemHashes } from './transcript';
+import { SEALED_POE_AEAD, type SealedEnvelope, type X25519Slot } from './wrap';
 
 const NONCE_LENGTH = 24;
 const SLOTS_MAC_LENGTH = 32;
@@ -32,10 +32,12 @@ function distinctSlots(count: number): X25519Slot[] {
   return slots;
 }
 
+const HASHES: ItemHashes = { 'sha2-256': new Uint8Array(32) };
+
 function envelopeWithSlots(slots: X25519Slot[]): SealedEnvelope {
   return {
     scheme: 1,
-    aead: 'xchacha20-poly1305',
+    aead: SEALED_POE_AEAD,
     kem: 'x25519',
     nonce: new Uint8Array(NONCE_LENGTH),
     slots,
@@ -51,6 +53,7 @@ function unwrapErrorCode(slots: X25519Slot[]): string | null {
     eciesSealedPoeUnwrap({
       envelope: envelopeWithSlots(slots),
       ciphertext: new Uint8Array(16),
+      hashes: HASHES,
       recipientSecretKey: new Uint8Array(32).fill(0x11),
     });
     return null;
@@ -93,6 +96,7 @@ describe('sealed-poe verifier resource bounds', () => {
     const result = eciesSealedPoeUnwrap({
       envelope: envelopeWithSlots(distinctSlots(justUnder)),
       ciphertext: new Uint8Array(16),
+      hashes: HASHES,
       recipientSecretKey: new Uint8Array(32).fill(0x11),
     });
     expect(result.matched).toBe(false);

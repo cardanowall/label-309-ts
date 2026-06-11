@@ -2,11 +2,17 @@
 // Conformance CLI: single-tx verification against the Label 309 standalone
 // verifier.
 //
-// Exit codes (extended with 4 for CLI input errors):
-//   0 = valid, 1 = failed (integrity), 2 = failed (network),
-//   3 = pending, 4 = CLI input error
+// Exit codes mirror the verifier's four-state mapping; 4 and higher denote
+// verifier-host failures that are not record-attributable:
+//   0 = valid, 1 = failed, 2 = unverifiable, 3 = pending,
+//   4 = CLI input error or verifier-host runtime failure
 
-import { KOIOS_MAINNET_URL, exitCodeForVerdict, verifyTx } from '../verifier/index';
+import {
+  KOIOS_MAINNET_URL,
+  exitCodeForVerdict,
+  verifyReportToDict,
+  verifyTx,
+} from '../verifier/index';
 
 const VERSION = '0.1.0';
 
@@ -72,8 +78,8 @@ const USAGE = `Usage: cardanowall-sdk-conformance <tx-hash> [--gateway <url>] [-
 
 Runs the @cardanowall/sdk-ts standalone Label 309 verifier against a single
 Cardano transaction. Exit codes:
-  0 = valid, 1 = failed (integrity), 2 = failed (network), 3 = pending,
-  4 = CLI input error.`;
+  0 = valid, 1 = failed, 2 = unverifiable, 3 = pending,
+  4 = CLI input error or verifier-host runtime failure.`;
 
 export interface RunIO {
   readonly stdout: (text: string) => void;
@@ -115,13 +121,15 @@ export async function run(args: ReadonlyArray<string>, io: RunIO): Promise<numbe
       cardanoGatewayChain: gateways,
       ...(parsed.threshold !== undefined ? { confirmationDepthThreshold: parsed.threshold } : {}),
     });
-    io.stdout(JSON.stringify(report, null, 2) + '\n');
+    io.stdout(JSON.stringify(verifyReportToDict(report), null, 2) + '\n');
     return exitCodeForVerdict(report);
   } catch (err) {
+    // A thrown error is a verifier-host runtime failure, not a verdict: it is
+    // never record-attributable and never masquerades as one.
     io.stderr(
       `cardanowall-sdk-conformance: verifier error: ${err instanceof Error ? err.message : String(err)}\n`,
     );
-    return 2;
+    return 4;
   }
 }
 

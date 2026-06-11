@@ -21,9 +21,10 @@ import {
 } from '@cardanowall/crypto-core/cbor';
 import { coseSign1Label309Build } from '@cardanowall/crypto-core/cose';
 import { signEd25519, getPublicKeyEd25519 } from '@cardanowall/crypto-core/sig';
-import { chunkBytes, encodeRecordBodyForSigning, type PoeRecord } from '@cardanowall/poe-standard';
+import { encodeRecordBodyForSigning, type PoeRecord } from '@cardanowall/poe-standard';
 import { describe, expect, it } from 'vitest';
 
+import { IssueSink } from '../verifier/issues';
 import { verifyRecordSignatures } from '../verifier/signatures';
 
 import { OffHostSignError, assembleCoseSign1, prepareSigStructure } from './off-host-sign';
@@ -56,7 +57,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const fixturePath = path.resolve(here, '../../tests/fixtures/cose/sign1-build.json');
+const fixturePath = path.resolve(here, '../../../crypto-core/tests/fixtures/cose/sign1-build.json');
 const corpus = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as Sign1BuildCorpus;
 
 describe.each(corpus.cardano_poe_vectors)(
@@ -66,35 +67,35 @@ describe.each(corpus.cardano_poe_vectors)(
     const signerPubkey = hexToBytes(vector.signer_public_key_hex);
     const seed = hexToBytes(vector.signer_secret_key_hex);
 
-    it('off-host-built sigs[] round-trips through verifyRecordSignatures as valid', async () => {
+    it('off-host-built sigs[] round-trips through verifyRecordSignatures as valid', () => {
       const { sigStructureBytes } = prepareSigStructure({ record, signerPubkey });
       const signature = signEd25519({ seed, message: sigStructureBytes });
       const { sigEntry } = assembleCoseSign1({ record, signerPubkey, signature });
       const completedRecord: PoeRecord = { ...record, sigs: [sigEntry] };
-      const out = await verifyRecordSignatures({
+      const out = verifyRecordSignatures({
         record: completedRecord,
-        input: { txHash: '0'.repeat(64), cardanoNetwork: 'mainnet' },
+        cardanoNetwork: 'mainnet',
+        issues: new IssueSink(),
       });
       expect(out).toHaveLength(1);
       expect(out[0]).toMatchObject({
         index: 0,
         verdict: 'valid',
-        signer_type: 'in-signature-kid',
-        signer_pub: vector.signer_public_key_hex,
+        signerType: 'in-signature-kid',
+        signerPub: vector.signer_public_key_hex,
       });
       expect(out[0]?.reason).toBeUndefined();
     });
 
-    it('chunk array byte-matches the in-process signer', () => {
+    it('cose_sign1 byte-matches the in-process signer', () => {
       // Inline reconstruction of the in-process path (no application-layer
       // import; preserves package-tree purity). The signer feeds
       // protectedHeader = {1:-8, 4:pub} + unprotectedHeader = {} + record body
       // through `coseSign1Label309Build` with the seed; the off-host helper
       // computes the SAME inputs and feeds them through `encodeCoseSign1` with
       // an externally-produced signature. Ed25519 is deterministic per
-      // RFC 8032 §5.1.6, canonical-CBOR is byte-deterministic per RFC 8949
-      // §4.2.1, and `chunkBytes` is a pure 64-byte slicer — so the chunk
-      // arrays MUST byte-match.
+      // RFC 8032 §5.1.6 and canonical-CBOR is byte-deterministic per RFC 8949
+      // §4.2.1 — so the emitted COSE_Sign1 byte strings MUST match.
       const pub = getPublicKeyEd25519({ seed });
       expect(bytesToHex(pub)).toBe(vector.signer_public_key_hex);
       const recordBodyCbor = encodeRecordBodyForSigning(record);
@@ -107,20 +108,16 @@ describe.each(corpus.cardano_poe_vectors)(
         recordBodyCbor,
         signerSecretKey: seed,
       });
-      const chunksInProc = chunkBytes(coseInProc);
-
       const { sigStructureBytes } = prepareSigStructure({ record, signerPubkey });
       const signature = signEd25519({ seed, message: sigStructureBytes });
       const { sigEntry } = assembleCoseSign1({ record, signerPubkey, signature });
 
-      const inProcCborHex = chunksInProc.map((c) => bytesToHex(c));
-      const offHostCborHex = sigEntry.cose_sign1.map((c) => bytesToHex(c));
-      expect(offHostCborHex).toEqual(inProcCborHex);
+      expect(bytesToHex(sigEntry.cose_sign1)).toBe(bytesToHex(coseInProc));
 
       // Encoded sig entries are byte-identical too.
       const offHostEntryCbor = encodeCanonicalCbor(sigEntry as unknown as CanonicalCborValue);
       const inProcEntryCbor = encodeCanonicalCbor({
-        cose_sign1: chunksInProc,
+        cose_sign1: coseInProc,
       } as unknown as CanonicalCborValue);
       expect(bytesToHex(offHostEntryCbor)).toBe(bytesToHex(inProcEntryCbor));
     });

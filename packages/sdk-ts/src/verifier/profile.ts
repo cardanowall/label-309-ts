@@ -71,13 +71,16 @@ export function planProfileSkips(profile: Profile, record: PoeRecord): ProfileSk
       severity: 'info',
     });
   }
-  if (!readsEnc && Array.isArray(record.items) && record.items.some((it) => it.enc !== undefined)) {
-    skips.push({
-      code: 'OUT_OF_PROFILE_SKIPPED',
-      path: ['items', 'enc'],
-      message: `items[].enc requires profile >= 'sealed'; active profile is '${profile}'`,
-      severity: 'info',
-    });
+  if (!readsEnc && Array.isArray(record.items)) {
+    for (let i = 0; i < record.items.length; i++) {
+      if (record.items[i]!.enc === undefined) continue;
+      skips.push({
+        code: 'OUT_OF_PROFILE_SKIPPED',
+        path: ['items', i, 'enc'],
+        message: `items[${i}].enc requires profile >= 'sealed'; active profile is '${profile}'`,
+        severity: 'info',
+      });
+    }
   }
   return { skips, verifySignatures, verifyDecrypt };
 }

@@ -53,7 +53,7 @@ const BlockfrostBlocksLatestSchema = z
   .passthrough();
 
 // Out-of-band recipient secret keys (hex) the replay feeds into `verifyTx`'s
-// `decryption` input so a sealed record's `item_decryptions` are populated.
+// `decryption` keyring so a sealed record's `items[].decryption` is populated.
 const RecipientSecretKeySchema = z.object({
   item_index: z.number().int().nonnegative(),
   secret_key: z.string(),
@@ -61,7 +61,7 @@ const RecipientSecretKeySchema = z.object({
 
 export const MainnetCorpusRecordSchema = z.object({
   tx_hash: z.string().length(64),
-  expected_verdict: z.enum(['valid', 'pending', 'failed']),
+  expected_verdict: z.enum(['valid', 'pending', 'unverifiable', 'failed']),
   // Which gateway the replay resolves through. Defaults to Koios; only the
   // dedicated Blockfrost-coverage record sets "blockfrost".
   provider: z.enum(['koios', 'blockfrost']).optional(),
@@ -72,7 +72,9 @@ export const MainnetCorpusRecordSchema = z.object({
     blockfrost_tx_cbor: BlockfrostTxCborSchema.optional(),
     blockfrost_tx: BlockfrostTxSchema.optional(),
     blockfrost_blocks_latest: BlockfrostBlocksLatestSchema.optional(),
-    arweave_envelope_responses: z.record(z.string(), z.string()).optional(),
+    // Captured Arweave gateway bodies, keyed by txid (hex bytes): plain item
+    // content, Merkle leaves-list documents, and sealed-PoE ciphertext alike.
+    arweave_responses: z.record(z.string(), z.string()).optional(),
   }),
   // Recipient X25519 secrets the replay plumbs into `verifyTx({ decryption })`
   // so sealed records produce a real recipient decrypt in their golden.

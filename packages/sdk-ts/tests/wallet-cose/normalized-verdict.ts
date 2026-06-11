@@ -28,8 +28,8 @@ export interface NormalizedSigVerdict {
 export function toNormalizedSigVerdict(v: VerifyRecordSignature): NormalizedSigVerdict {
   return {
     index: v.index,
-    signer_pub_hex: v.signer_pub ?? null,
-    signer_type: v.signer_type ?? null,
+    signer_pub_hex: v.signerPub ?? null,
+    signer_type: v.signerType ?? null,
     ok: v.verdict === 'valid',
     reason: v.reason ?? null,
   };

@@ -33,7 +33,6 @@ import {
 import { encodeLeavesList } from '@cardanowall/crypto-core/merkle';
 import { eciesSealedPoeWrap } from '@cardanowall/crypto-core/sealed-poe';
 import {
-  chunkUri,
   encodePoeRecord,
   type EncryptionEnvelope,
   type MerkleCommit,
@@ -43,6 +42,11 @@ import {
 import { assembleCoseSign1, prepareSigStructure } from './off-host-sign';
 import { PartialUploadError } from './partial-upload-error';
 import { parseHttpError } from './parse-http-error';
+import {
+  uploadResumable,
+  DEFAULT_RESUMABLE_THRESHOLD_BYTES,
+  type SingleShotUpload,
+} from './resumable-upload';
 import type {
   FetchImpl,
   PublishContentInput,
@@ -52,6 +56,7 @@ import type {
   PublishResponse,
   PublishSealedInput,
   Signer,
+  StorageTarget,
   SupportedHashAlg,
   UploadsResponse,
   UploadSuccessEntry,
@@ -234,33 +239,61 @@ async function postPublish(
   return { ...parsed, dedup_hit: response.status === 200 };
 }
 
-async function postUploads(
-  config: ResolvedPublishConfig,
-  blobs: ReadonlyArray<Uint8Array>,
-  idempotencyKey: string | undefined,
-): Promise<UploadsResponse> {
-  const form = new FormData();
-  form.append('target', STORAGE_TARGET_ARWEAVE);
-  for (let idx = 0; idx < blobs.length; idx++) {
-    const bytes = blobs[idx]!;
+// Single-shot multipart upload of one blob, resolving its `ar://` URI. Backs
+// the small-blob branch of `uploadBlob` and the resumable helper's
+// below-threshold fast path.
+const singleShotUpload =
+  (config: ResolvedPublishConfig): SingleShotUpload =>
+  async ({ target, bytes, idempotencyKey, signal }) => {
+    const form = new FormData();
+    form.append('target', target);
     form.append(
-      `file_${idx}`,
+      'file_0',
       new Blob([bytes as unknown as ArrayBuffer], { type: 'application/octet-stream' }),
-      `file_${idx}.bin`,
+      'file_0.bin',
     );
+    const response = await config.fetch(`${config.baseUrl}/api/v1/poe/uploads`, {
+      method: 'POST',
+      headers: buildMultipartHeaders(config.apiKey, idempotencyKey),
+      body: form,
+      ...(signal ? { signal } : {}),
+    });
+    await throwIfNotOk(response);
+    const result = (await readJson(response)) as UploadsResponse;
+    const entry = result.uploads[0];
+    if (entry === undefined || entry.ok === false) {
+      throw new PartialUploadError(result);
+    }
+    const ok = entry as UploadSuccessEntry;
+    return { uri: ok.uri, sha256: ok.sha256, bytes: ok.bytes };
+  };
+
+// Upload one blob (sealed ciphertext or Merkle leaves-list) and return its
+// `ar://` URI. A blob at or below the resumable threshold takes the unchanged
+// single-shot multipart path; a larger blob transparently uses the resumable
+// session flow so a multi-GB ciphertext clears CDN/proxy single-request caps.
+// Both paths end at the same URI, so the publisher helpers' signatures and
+// on-chain record shape are unaffected by the blob's size.
+async function uploadBlob(
+  config: ResolvedPublishConfig,
+  bytes: Uint8Array,
+  idempotencyKey: string | undefined,
+): Promise<string> {
+  const target: StorageTarget = STORAGE_TARGET_ARWEAVE;
+  if (bytes.byteLength <= DEFAULT_RESUMABLE_THRESHOLD_BYTES) {
+    const single = await singleShotUpload(config)({
+      target,
+      bytes,
+      ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+    });
+    return single.uri;
   }
-  const response = await config.fetch(`${config.baseUrl}/api/v1/poe/uploads`, {
-    method: 'POST',
-    headers: buildMultipartHeaders(config.apiKey, idempotencyKey),
-    body: form,
+  const result = await uploadResumable(config, singleShotUpload(config), {
+    target,
+    source: bytes,
+    ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
   });
-  await throwIfNotOk(response);
-  const result = (await readJson(response)) as UploadsResponse;
-  const anyFailed = result.uploads.some((u) => u.ok === false);
-  if (anyFailed) {
-    throw new PartialUploadError(result);
-  }
-  return result;
+  return result.uri;
 }
 
 /**
@@ -380,28 +413,31 @@ export async function publishSealed(
   const hashAlg: SupportedHashAlg = input.hashAlg ?? 'sha2-256';
   const plaintext = toBytes(input.content);
   const plaintextDigest = hashContent(plaintext, hashAlg);
+  const hashes = { [hashAlg]: plaintextDigest };
 
   // Encrypt the plaintext to the recipient public keys under the chosen KEM.
+  // The item's plaintext-hash claim is bound into the slots transcript, so
+  // the envelope cannot later be spliced onto a different hashes map.
   const sealed = eciesSealedPoeWrap({
     plaintext,
+    hashes,
     recipientPublicKeys: input.recipients.map((r) => r),
     kem,
   });
 
-  // Upload the ciphertext to Arweave.
-  const uploadsResp = await postUploads(config, [sealed.ciphertext], input.idempotencyKey);
-  const uri = (uploadsResp.uploads[0] as UploadSuccessEntry).uri;
+  // Upload the ciphertext to Arweave (resumable for large ciphertexts).
+  const uri = await uploadBlob(config, sealed.ciphertext, input.idempotencyKey);
 
   // Build the sealed record: one item with the plaintext-bind hash, the
   // `ar://<tx>` URI of the ciphertext, and the discriminated envelope shape.
   // Narrow on the envelope `kem` to emit the correct per-slot fields:
-  // classical slots carry `{ epk, wrap }`, hybrid slots carry chunked
-  // `{ kem_ct, wrap }`.
+  // classical slots carry `{ epk, wrap }`, hybrid slots carry the single
+  // 1120-byte `{ kem_ct, wrap }`.
   const env = sealed.envelope;
   const slots =
     env.kem === 'mlkem768x25519'
       ? env.slots.map((s) => ({
-          kem_ct: s.kem_ct.map((c) => cloneToOwnedBuffer(c)),
+          kem_ct: cloneToOwnedBuffer(s.kem_ct),
           wrap: cloneToOwnedBuffer(s.wrap),
         }))
       : env.slots.map((s) => ({
@@ -421,8 +457,8 @@ export async function publishSealed(
     v: 1,
     items: [
       {
-        hashes: { [hashAlg]: plaintextDigest },
-        uris: [chunkUri(uri)],
+        hashes,
+        uris: [uri],
         enc: envelope,
       },
     ],
@@ -470,16 +506,15 @@ export async function publishMerkle(
   const root = cloneToOwnedBuffer(merkleSha2256Root(leaves));
   const leavesListCbor = encodeLeavesList({ leaves, root });
 
-  // Upload the leaves-list to Arweave.
-  const uploadsResp = await postUploads(config, [leavesListCbor], input.idempotencyKey);
-  const uri = (uploadsResp.uploads[0] as UploadSuccessEntry).uri;
+  // Upload the leaves-list to Arweave (resumable for large leaves-lists).
+  const uri = await uploadBlob(config, leavesListCbor, input.idempotencyKey);
 
   // Build the on-chain record with the resulting `ar://` URI.
   const merkleEntry: MerkleCommit = {
     alg: MERKLE_ALG_ID,
     root,
     leaf_count: leaves.length,
-    uris: [chunkUri(uri)],
+    uris: [uri],
   };
   const record: PoeRecord = { v: 1, merkle: [merkleEntry] };
   const recordBytes = await encodeRecord(record, input.signer);

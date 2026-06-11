@@ -6,19 +6,33 @@
 // validator as `SIG_ENTRY_KID_COSE_KEY_CONFLICT`):
 //
 //   Path 1 — protected-header `kid` is exactly 32 bytes (raw Ed25519 pubkey).
-//   Path 2 — `sigs[i].cose_key` is a chunked `cbor<COSE_Key>` blob carrying
-//            the wallet's public key. The protected header carries a 29-byte
-//            CIP-19 stake address at label `"address"`; the verifier
-//            recomputes `address_derived = network_header || Blake2b-224(pub)`
-//            and rejects on mismatch (`WALLET_ADDRESS_MISMATCH`).
+//   Path 2 — `sigs[i].cose_key` is a single `cbor<COSE_Key>` byte string
+//            carrying the wallet's public key. The protected header carries a
+//            29-byte CIP-19 stake address at label `"address"`; the verifier
+//            recomputes `expected_network_header || Blake2b-224(pub)` —
+//            deriving the network byte from the CONTAINING TRANSACTION's
+//            network, never echoing the byte found in the record — and
+//            rejects on any of the 29 bytes (`WALLET_ADDRESS_MISMATCH`).
 //
-// The signed-payload construction (`Sig_structure[3] = "cardano-poe-record-sig-v1" ||
-// canonicalCbor(record_body)`, `Sig_structure[2] = h''`) is enforced by the
-// `coseSign1Label309Verify` helper in `@cardanowall/crypto-core/cose` — this
-// verifier never sees the prefix directly.
+// The producer's protected-header bytes are used VERBATIM as
+// `Sig_structure[1]` — never re-encoded or re-canonicalised (RFC 9052 §4.4) —
+// and the signing body is the canonical de-chunked record body with `sigs`
+// removed; both rules are enforced by `coseSign1Label309Verify` in
+// `@cardanowall/crypto-core/cose`. Ed25519 verification is strict per
+// RFC 8032 §5.1.7 (canonical R/S, low-order rejection, no cofactor
+// multiplication).
+//
+// Record signatures are OPTIONAL: a public hash-only PoE remains valid even
+// when every signature entry is unverifiable (SIGNATURE_UNSUPPORTED, info).
+// Every `unsupported` per-signature verdict puts SIGNATURE_UNSUPPORTED (info)
+// at ['sigs', i] EXACTLY ONCE: the structural validator contributes the same
+// issue for UNREGISTERED algorithms, while a registered-but-unimplemented
+// algorithm is only detected here, so this pass emits idempotently against
+// the sink. Error-class failures (SIGNATURE_INVALID, SIGNER_KEY_UNRESOLVED,
+// WALLET_ADDRESS_MISMATCH, MALFORMED_SIG_COSE_SIGN1) raise issues into the
+// run's sink and fail the record.
 
 import {
-  bytesChunkArrayConcat,
   encodeRecordBodyForSigning,
   type PoeRecord,
   type SigEntry,
@@ -33,14 +47,13 @@ import { blake2b224 } from '@cardanowall/crypto-core/hash';
 import { compareCt } from '@cardanowall/crypto-core/util';
 
 import { bytesToHex } from '../hex';
-import type { SignatureFailureReason, VerifyRecordSignature, VerifyTxInput } from './types';
+import type { IssueSink } from './issues';
+import type { SignatureFailureReason, VerifyRecordSignature } from './types';
 
-// v1 wallet-path constraint: stake (reward) addresses only. The 29-byte CIP-19
-// layout is `network_header_byte || Blake2b-224(stake_vk)`. CIP-19
-// stake-address network bytes: mainnet = 0xe1, testnet = 0xe0 (preprod and
-// preview share the testnet header). Product policy is mainnet-only; the
-// preprod branch exists only so dev environments can replay records anchored
-// on preprod against the same standalone verifier.
+// v1 wallet-path constraint: stake (reward) addresses only. The 29-byte
+// CIP-19 layout is `network_header_byte || Blake2b-224(stake_vk)`; stake
+// network bytes: mainnet = 0xe1, testnet = 0xe0 (preprod and preview share
+// the testnet header).
 const CARDANO_MAINNET_STAKE_NETWORK_BYTE = 0xe1;
 const CARDANO_PREPROD_STAKE_NETWORK_BYTE = 0xe0;
 const CARDANO_STAKE_ADDRESS_LENGTH = 29;
@@ -49,32 +62,63 @@ const BLAKE2B_224_LENGTH = 28;
 
 export interface VerifyRecordSignaturesArgs {
   readonly record: PoeRecord;
-  readonly input: VerifyTxInput;
+  readonly cardanoNetwork: 'mainnet' | 'preprod';
+  readonly issues: IssueSink;
 }
 
-export async function verifyRecordSignatures(
-  args: VerifyRecordSignaturesArgs,
-): Promise<VerifyRecordSignature[]> {
-  const { record, input } = args;
+export function verifyRecordSignatures(args: VerifyRecordSignaturesArgs): VerifyRecordSignature[] {
+  const { record } = args;
   // The signed payload is canonical-CBOR(record_body), where record_body =
-  // record minus `sigs`. We use the encoder helper to keep the wire shape and
-  // key sort in lockstep with producer-side signing.
+  // record minus `sigs`. The encoder helper keeps the wire shape and key sort
+  // in lockstep with producer-side signing.
   const recordBodyCbor = encodeRecordBodyForSigning(record);
   const list = record.sigs ?? [];
   const out: VerifyRecordSignature[] = [];
   for (let i = 0; i < list.length; i++) {
-    out.push(await verifyOneSig(i, list[i]!, recordBodyCbor, input));
+    const result = verifyOneSig(i, list[i]!, recordBodyCbor, args.cardanoNetwork);
+    out.push(result);
+    if (result.verdict === 'invalid' || result.verdict === 'unresolved') {
+      args.issues.add(
+        result.reason ?? 'SIGNATURE_INVALID',
+        ['sigs', i],
+        signatureFailureMessage(result),
+      );
+    } else if (result.verdict === 'unsupported') {
+      // An unsupported entry MUST surface as exactly one SIGNATURE_UNSUPPORTED
+      // (info) at ['sigs', i]. The idempotent add covers both ways an entry
+      // gets here: an UNREGISTERED algorithm (the structural validator already
+      // contributed the identical issue) and a registered algorithm this
+      // verifier does not implement (only this pass detects it).
+      args.issues.addOnce(
+        'SIGNATURE_UNSUPPORTED',
+        ['sigs', i],
+        'the COSE_Sign1 signature algorithm is not implemented by this verifier; the entry is unsupported, not invalid',
+      );
+    }
   }
   return out;
 }
 
-async function verifyOneSig(
+function signatureFailureMessage(result: VerifyRecordSignature): string {
+  switch (result.reason) {
+    case 'MALFORMED_SIG_COSE_SIGN1':
+      return 'the cose_sign1 blob is not a verifiable detached COSE_Sign1';
+    case 'SIGNER_KEY_UNRESOLVED':
+      return 'neither key-resolution path yielded a 32-byte Ed25519 public key';
+    case 'WALLET_ADDRESS_MISMATCH':
+      return 'the wallet-path protected-header address does not equal the recomputed network_header || Blake2b-224(pubkey)';
+    default:
+      return 'strict Ed25519 verification failed against the resolved public key';
+  }
+}
+
+function verifyOneSig(
   index: number,
   entry: SigEntry,
   recordBodyCbor: Uint8Array,
-  input: VerifyTxInput,
-): Promise<VerifyRecordSignature> {
-  const coseBytes = bytesChunkArrayConcat(entry.cose_sign1);
+  cardanoNetwork: 'mainnet' | 'preprod',
+): VerifyRecordSignature {
+  const coseBytes = entry.cose_sign1;
   let cose: CoseSign1Decoded;
   try {
     cose = decodeCoseSign1(coseBytes);
@@ -89,7 +133,8 @@ async function verifyOneSig(
   }
   const { pub, signerType } = resolved;
 
-  // Strict Ed25519 verify via the Label 309-pinned helper.
+  // Strict Ed25519 verify; Sig_structure[1] is the producer's protected bytes
+  // verbatim.
   const verifyResult = coseSign1Label309Verify({
     message: coseBytes,
     detachedRecordBodyCbor: recordBodyCbor,
@@ -102,16 +147,16 @@ async function verifyOneSig(
       return {
         index,
         verdict: 'unsupported',
-        signer_type: signerType,
-        signer_pub: bytesToHex(pub),
+        signerType,
+        signerPub: bytesToHex(pub),
         reason,
       };
     }
     return {
       index,
       verdict: 'invalid',
-      signer_type: signerType,
-      signer_pub: bytesToHex(pub),
+      signerType,
+      signerPub: bytesToHex(pub),
       reason,
     };
   }
@@ -119,13 +164,13 @@ async function verifyOneSig(
   // Path-2 wallet `address` ↔ `cose_key` binding. Path-1 entries skip this
   // check entirely.
   if (signerType === 'wallet-inline-key') {
-    const addressOk = checkWalletAddressBinding(cose, pub, input);
+    const addressOk = checkWalletAddressBinding(cose, pub, cardanoNetwork);
     if (!addressOk) {
       return {
         index,
         verdict: 'invalid',
-        signer_type: signerType,
-        signer_pub: bytesToHex(pub),
+        signerType,
+        signerPub: bytesToHex(pub),
         reason: 'WALLET_ADDRESS_MISMATCH',
       };
     }
@@ -134,8 +179,8 @@ async function verifyOneSig(
   return {
     index,
     verdict: 'valid',
-    signer_type: signerType,
-    signer_pub: bytesToHex(pub),
+    signerType,
+    signerPub: bytesToHex(pub),
   };
 }
 
@@ -167,10 +212,9 @@ function resolveSignerKey(cose: CoseSign1Decoded, entry: SigEntry): ResolvedKey 
       signerType: 'in-signature-kid',
     };
   }
-  // Path 2 — chunked `cbor<COSE_Key>` carrying the wallet pubkey.
+  // Path 2 — a single `cbor<COSE_Key>` byte string carrying the wallet pubkey.
   if (entry.cose_key !== undefined) {
-    const blob = bytesChunkArrayConcat(entry.cose_key);
-    const pub = parseCoseKeyEd25519(blob);
+    const pub = parseCoseKeyEd25519(entry.cose_key);
     if (pub !== null && pub.length === ED25519_PUBLIC_KEY_LENGTH) {
       return { kind: 'wallet-inline-key', pub, signerType: 'wallet-inline-key' };
     }
@@ -197,27 +241,24 @@ function mapVerifyError(code: string): SignatureFailureReason {
 // Recompute the 29-byte stake address from the resolved Ed25519 pubkey and
 // compare it byte-exact (constant-time) to the path-2 protected-header
 // `address` field. The wallet path binds to stake (reward) addresses only in
-// v1 — base/enterprise/pointer/payment addresses are rejected (the recomputed
-// 29-byte stake address fails the equality check against any other
-// format/length).
+// v1 — base/enterprise/pointer/payment addresses fail the equality check
+// against the recomputed 29-byte stake address.
 function checkWalletAddressBinding(
   cose: CoseSign1Decoded,
   pub: Uint8Array,
-  input: VerifyTxInput,
+  cardanoNetwork: 'mainnet' | 'preprod',
 ): boolean {
   const networkByte =
-    (input.cardanoNetwork ?? 'mainnet') === 'preprod'
+    cardanoNetwork === 'preprod'
       ? CARDANO_PREPROD_STAKE_NETWORK_BYTE
       : CARDANO_MAINNET_STAKE_NETWORK_BYTE;
   const rawAddress = cose.protectedHeader.get('address') as unknown;
   if (!(rawAddress instanceof Uint8Array)) {
-    // Address-less path-2 records are non-conformant with CIP-30 signData
-    // (a wallet signature without an address claim cannot be safely surfaced
-    // as wallet-bound). Treat as WALLET_ADDRESS_MISMATCH.
+    // `address` is REQUIRED on the wallet path: a wallet signature without an
+    // address claim cannot be safely surfaced as wallet-bound.
     return false;
   }
   if (rawAddress.length !== CARDANO_STAKE_ADDRESS_LENGTH) return false;
-  if (rawAddress[0] !== networkByte) return false;
   const stakeKeyHash = blake2b224(pub);
   if (stakeKeyHash.length !== BLAKE2B_224_LENGTH) {
     // Defensive guard — `blake2b224` is byte-pinned to 28 bytes.

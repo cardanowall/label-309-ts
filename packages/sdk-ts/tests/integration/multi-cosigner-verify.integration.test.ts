@@ -18,14 +18,12 @@ import {
   type CanonicalCborValue,
 } from '@cardanowall/crypto-core/cbor';
 import {
-  chunkBytes,
   encodePoeRecord,
   encodeRecordBodyForSigning,
-  type ChunkedBytesArray,
   type PoeRecord,
   type SigEntry,
 } from '@cardanowall/poe-standard';
-import { verifyRecordSignatures } from '@cardanowall/sdk-ts/verifier';
+import { IssueSink, verifyRecordSignatures } from '@cardanowall/sdk-ts/verifier';
 import { describe, expect, it } from 'vitest';
 
 // Reference inputs (byte-pinned seeds + pubkeys).
@@ -38,12 +36,6 @@ const AR_URI = 'ar://qP3RkY7nBs2Fz9HxV1WuC5oJ4mE6tN8aL0iDXgQrU0K';
 const A2_SHA = '97a7881ce48f5bf457261797e06e3387a904f0ee70488d3c03090635800320ee';
 const A2_BLAKE = '2d3b9520f17f6be4e26361b18afc8d7bbdbc2cd4209319a77f014f2fd0d409a4';
 
-function chunkText(s: string): readonly string[] {
-  // §A.6.7 fixture uses single-chunk text(48) for the ar:// uri (47 bytes
-  // ≤ 64-byte chunk size).
-  return [s];
-}
-
 function buildRecordBody(): PoeRecord {
   return {
     v: 1,
@@ -53,7 +45,7 @@ function buildRecordBody(): PoeRecord {
           'sha2-256': hexToBytes(A2_SHA) as Uint8Array<ArrayBuffer>,
           'blake2b-256': hexToBytes(A2_BLAKE) as Uint8Array<ArrayBuffer>,
         },
-        uris: [chunkText(AR_URI) as string[]],
+        uris: [AR_URI],
       },
     ],
   };
@@ -81,7 +73,7 @@ function buildIdentitySigEntry(body: PoeRecord): SigEntry {
     payload: null,
     signature,
   });
-  return { cose_sign1: chunkBytes(cose) as ChunkedBytesArray };
+  return { cose_sign1: cose as Uint8Array<ArrayBuffer> };
 }
 
 function buildWalletSigEntry(body: PoeRecord): SigEntry {
@@ -91,12 +83,8 @@ function buildWalletSigEntry(body: PoeRecord): SigEntry {
     WALLET_PUBKEY_HEX,
   );
   // Compute a REAL stake address that binds to the wallet pubkey via
-  // network_header || Blake2b-224(pubkey). The reference vector ships a
-  // SYNTHETIC `e0 + 22*28` mock address that fails the verifier's path-2
-  // WALLET_ADDRESS_MISMATCH check; this test needs a record that verifies
-  // successfully, so we bind to the real Blake2b-224 derivation. This
-  // deviates from the spec's byte-pinned CBOR but matches the verifier's
-  // semantic expectation.
+  // network_header || Blake2b-224(pubkey): this test needs a record that
+  // verifies successfully, so the address carries the real derivation.
   const MAINNET_HEADER = 0xe1;
   const pubHash = blake2b224(publicKey);
   const stakeAddr = new Uint8Array(29);
@@ -121,7 +109,7 @@ function buildWalletSigEntry(body: PoeRecord): SigEntry {
     signature,
   });
   // Path-2 COSE_Key blob: `{1: 1, 3: -8, -1: 6, -2: pubkey}` (kty=OKP,
-  // alg=Ed25519, crv=Ed25519, x=pubkey). Matches §A.6.7 fixture.
+  // alg=Ed25519, crv=Ed25519, x=pubkey).
   const coseKey = encodeCanonicalCbor(
     new Map<number, unknown>([
       [1, 1],
@@ -131,12 +119,12 @@ function buildWalletSigEntry(body: PoeRecord): SigEntry {
     ]) as unknown as CanonicalCborValue,
   );
   return {
-    cose_sign1: chunkBytes(cose) as ChunkedBytesArray,
-    cose_key: chunkBytes(coseKey) as ChunkedBytesArray,
+    cose_sign1: cose as Uint8Array<ArrayBuffer>,
+    cose_key: coseKey as Uint8Array<ArrayBuffer>,
   };
 }
 
-describe('multi-cosigner verifier integration (§A.6.7 mixed-paths, identity-first)', () => {
+describe('multi-cosigner verifier integration (mixed-paths, identity-first)', () => {
   const body = buildRecordBody();
   const identityEntry = buildIdentitySigEntry(body);
   const walletEntry = buildWalletSigEntry(body);
@@ -145,22 +133,24 @@ describe('multi-cosigner verifier integration (§A.6.7 mixed-paths, identity-fir
     sigs: [identityEntry, walletEntry],
   };
 
-  it('verifyRecordSignatures returns 2 per-entry verdicts in insertion order', async () => {
-    const out = await verifyRecordSignatures({
+  it('verifyRecordSignatures returns 2 per-entry verdicts in insertion order', () => {
+    const out = verifyRecordSignatures({
       record,
-      input: { txHash: '0'.repeat(64) },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out).toHaveLength(2);
     expect(out[0]!.verdict).toBe('valid');
-    expect(out[0]!.signer_type).toBe('in-signature-kid');
+    expect(out[0]!.signerType).toBe('in-signature-kid');
     expect(out[1]!.verdict).toBe('valid');
-    expect(out[1]!.signer_type).toBe('wallet-inline-key');
+    expect(out[1]!.signerType).toBe('wallet-inline-key');
   });
 
-  it('preserves sigs[] insertion order in the verdict array (per-entry index)', async () => {
-    const out = await verifyRecordSignatures({
+  it('preserves sigs[] insertion order in the verdict array (per-entry index)', () => {
+    const out = verifyRecordSignatures({
       record,
-      input: { txHash: '0'.repeat(64) },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out[0]!.index).toBe(0);
     expect(out[1]!.index).toBe(1);
@@ -174,7 +164,7 @@ describe('multi-cosigner verifier integration (§A.6.7 mixed-paths, identity-fir
   });
 });
 
-describe('multi-cosigner verifier integration (§A.6.7 mixed-paths, wallet-first)', () => {
+describe('multi-cosigner verifier integration (mixed-paths, wallet-first)', () => {
   const body = buildRecordBody();
   const identityEntry = buildIdentitySigEntry(body);
   const walletEntry = buildWalletSigEntry(body);
@@ -183,15 +173,16 @@ describe('multi-cosigner verifier integration (§A.6.7 mixed-paths, wallet-first
     sigs: [walletEntry, identityEntry],
   };
 
-  it('verifyRecordSignatures returns 2 valid verdicts in the reverse insertion order', async () => {
-    const out = await verifyRecordSignatures({
+  it('verifyRecordSignatures returns 2 valid verdicts in the reverse insertion order', () => {
+    const out = verifyRecordSignatures({
       record,
-      input: { txHash: '0'.repeat(64) },
+      cardanoNetwork: 'mainnet',
+      issues: new IssueSink(),
     });
     expect(out).toHaveLength(2);
     expect(out[0]!.verdict).toBe('valid');
-    expect(out[0]!.signer_type).toBe('wallet-inline-key');
+    expect(out[0]!.signerType).toBe('wallet-inline-key');
     expect(out[1]!.verdict).toBe('valid');
-    expect(out[1]!.signer_type).toBe('in-signature-kid');
+    expect(out[1]!.signerType).toBe('in-signature-kid');
   });
 });

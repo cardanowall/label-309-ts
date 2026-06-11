@@ -5,6 +5,8 @@
 // (1 USD = 1,000,000 micros). The SDK accepts and returns strings — callers
 // promote to `bigint` at the application boundary where they need arithmetic.
 
+import type { ResumableSourceInput } from './resumable-source';
+
 export type FetchImpl = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 export interface Label309ClientConfig {
@@ -71,6 +73,234 @@ export type UploadEntry = UploadSuccessEntry | UploadFailureEntry;
 
 export interface UploadsResponse {
   readonly uploads: ReadonlyArray<UploadEntry>;
+}
+
+// =============================================================================
+// Resumable / chunked upload session — /api/v1/poe/uploads/sessions/*
+// =============================================================================
+//
+// A file larger than a client threshold is uploaded as a content-addressed
+// session: declare the whole-file SHA-256 and total size up front, PUT each
+// fixed-size chunk (out of order / in parallel is allowed), then complete. The
+// gateway assembles the chunks server-side and runs the SAME storage pipeline
+// the single-shot multipart upload runs, so both paths converge on one `ar://`
+// URI and one charge per logical file. The single-shot `uploads()` is unchanged
+// — the session flow is purely additive and chosen by `uploadResumable()` on
+// file size.
+//
+// Chunk size is the SERVER's decision: the create response returns the
+// authoritative `chunk_bytes` (the value it will accept) and a `max_chunk_bytes`
+// ceiling, both of which the client honours.
+
+/**
+ * Body of `POST /api/v1/poe/uploads/sessions`. `sha256` is the lowercase-hex
+ * digest of the WHOLE file; `chunk_bytes` is the client's requested chunk size,
+ * which the server clamps to `max_chunk_bytes` and echoes back authoritatively.
+ */
+export interface UploadSessionCreateRequest {
+  readonly target: StorageTarget;
+  readonly sha256: string;
+  readonly total_bytes: number;
+  readonly chunk_bytes: number;
+  readonly content_type?: string;
+}
+
+/**
+ * `201 Created` from session create. `chunk_bytes` is AUTHORITATIVE — the
+ * client recomputes its chunk grid from this value, not from what it requested.
+ */
+export interface UploadSessionCreateResponse {
+  readonly session_id: string;
+  readonly chunk_bytes: number;
+  readonly chunk_count: number;
+  readonly received: ReadonlyArray<number>;
+  readonly expires_at: string;
+  readonly max_chunk_bytes: number;
+}
+
+/**
+ * `200 OK` short-circuit returned by session create when the declared
+ * `(account, backend, sha256)` already has a committed receipt: the existing
+ * URI is returned and no bytes are uploaded.
+ *
+ * `charged_usd_micros` is a JSON number and is always `0` on this path (the
+ * bytes were already stored, so nothing is charged).
+ */
+export interface UploadSessionDeduplicatedResponse {
+  readonly deduplicated: true;
+  readonly uri: string;
+  readonly sha256: string;
+  readonly bytes: number;
+  readonly charged_usd_micros: number;
+}
+
+/** `200 OK` from a chunk PUT — the running received-set after this chunk. */
+export interface UploadSessionChunkResponse {
+  readonly index: number;
+  readonly received: ReadonlyArray<number>;
+  readonly remaining: number;
+  readonly complete: boolean;
+}
+
+export type UploadSessionState = 'open' | 'assembling' | 'completed' | 'failed' | 'expired';
+
+/**
+ * `GET /api/v1/poe/uploads/sessions/{sid}` — the resume contract. A
+ * reconnecting client reads `missing` and re-PUTs only those indices.
+ */
+export interface UploadSessionStatus {
+  readonly session_id: string;
+  readonly state: UploadSessionState;
+  readonly sha256: string;
+  readonly total_bytes: number;
+  readonly chunk_bytes: number;
+  readonly chunk_count: number;
+  readonly received: ReadonlyArray<number>;
+  readonly missing: ReadonlyArray<number>;
+  readonly expires_at: string;
+  readonly attempt_id: string | null;
+  readonly uri: string | null;
+}
+
+/**
+ * `POST /api/v1/poe/uploads/sessions/{sid}/complete`. Either the terminal
+ * committed/dedup outcome (`ok`), or `accepted` with an `attempt_id` to poll via
+ * `GET /api/v1/poe/uploads/attempts/{attempt_id}`.
+ */
+export interface UploadSessionCompletedResponse {
+  readonly ok: true;
+  readonly uri: string;
+  readonly sha256: string;
+  readonly bytes: number;
+  /**
+   * Storage USD (micro-USD) applied at completion, a JSON number: the number
+   * `0` on a free-window or deduped-on-commit completion, the charge otherwise.
+   */
+  readonly charged_usd_micros: number;
+}
+
+export interface UploadSessionAcceptedResponse {
+  readonly accepted: true;
+  readonly attempt_id: string;
+}
+
+export type UploadSessionCompleteResponse =
+  | UploadSessionCompletedResponse
+  | UploadSessionAcceptedResponse;
+
+/**
+ * `GET /api/v1/poe/uploads/attempts/{attempt_id}` — the terminal poll target
+ * shared with the single-shot path.
+ *
+ *   - `reserved`  — still in flight; keep polling.
+ *   - `committed` — terminal success; carries `uri` and `charged_usd_micros`.
+ *   - `released`  — terminal failure; carries `reason`.
+ *
+ * `attempt_id`, `sha256`, `bytes`, and `backend` are present in every state;
+ * `uri` / `charged_usd_micros` appear only on `committed`, `reason` only on
+ * `released`. `bytes` and `charged_usd_micros` are JSON numbers. Modelled as a
+ * discriminated union on `state` so a consumer that narrows on `state` sees
+ * exactly the fields that state carries.
+ */
+export type UploadAttemptState = 'reserved' | 'committed' | 'released';
+
+export type UploadAttemptReleaseReason = 'provider_rejected' | 'unrecoverable_staged_content_lost';
+
+interface UploadAttemptCommon {
+  readonly attempt_id: string;
+  readonly sha256: string;
+  readonly bytes: number;
+  readonly backend: string;
+}
+
+export interface UploadAttemptReserved extends UploadAttemptCommon {
+  readonly state: 'reserved';
+}
+
+export interface UploadAttemptCommitted extends UploadAttemptCommon {
+  readonly state: 'committed';
+  readonly uri: string;
+  readonly charged_usd_micros: number;
+}
+
+export interface UploadAttemptReleased extends UploadAttemptCommon {
+  readonly state: 'released';
+  /**
+   * Why the attempt failed. The gateway emits a closed set today
+   * (`provider_rejected` — retry; `unrecoverable_staged_content_lost` —
+   * re-upload), but a forward-compatible consumer should treat the value as an
+   * opaque string.
+   */
+  readonly reason: UploadAttemptReleaseReason | (string & {});
+}
+
+export type UploadAttemptStatus =
+  | UploadAttemptReserved
+  | UploadAttemptCommitted
+  | UploadAttemptReleased;
+
+// -----------------------------------------------------------------------------
+// uploadResumable() — high-level threshold-gated single-file upload
+// -----------------------------------------------------------------------------
+
+/**
+ * Input to `uploadResumable()`. The `source` works in both runtimes: a
+ * `Blob`/`File` in the browser, a `Uint8Array`, a filesystem path string, or a
+ * pre-adapted `ResumableSource` on the server. The helper uploads at most one
+ * file and returns its `ar://` URI.
+ */
+export interface UploadResumableInput {
+  readonly target?: StorageTarget;
+  /**
+   * Bytes to upload: a browser `Blob`/`File` (sliced + streamed from disk), a
+   * `Uint8Array`, a server filesystem path, or a `ResumableSource`.
+   */
+  readonly source: ResumableSourceInput;
+  /**
+   * Files at or below this size use the single-shot `uploads()` path unchanged;
+   * larger files use the session flow. Defaults to ~48 MiB so an upload clears
+   * common CDN/proxy single-request body caps below 100 MB.
+   */
+  readonly threshold?: number;
+  /**
+   * Requested chunk size for the session. The server clamps it to its
+   * `max_chunk_bytes` and the helper honours the returned authoritative value.
+   * Defaults to ~48 MiB.
+   */
+  readonly chunkBytes?: number;
+  /** Number of chunk PUTs in flight at once (default 4). */
+  readonly parallelism?: number;
+  /** Per-chunk retry attempts on a transient PUT failure (default 4). */
+  readonly maxChunkRetries?: number;
+  /**
+   * Stable key for `POST .../complete` replay. When omitted the helper derives
+   * one deterministically from the declared digest so a re-invocation replays
+   * the same terminal result rather than racing a second completion.
+   */
+  readonly idempotencyKey?: string;
+  /** MIME type recorded for the assembled data item. */
+  readonly contentType?: string;
+  /**
+   * Resume an interrupted upload: pass a `session_id` from a prior attempt and
+   * the helper GETs its status and uploads only the missing indices.
+   */
+  readonly sessionId?: string;
+  /** Abort signal forwarded to every underlying request. */
+  readonly signal?: AbortSignal;
+}
+
+/** Result of `uploadResumable()` — the committed storage location. */
+export interface UploadResumableResult {
+  /** Canonical `ar://<tx>` URI of the stored content. */
+  readonly uri: string;
+  /** Whole-file SHA-256, lowercase hex. */
+  readonly sha256: string;
+  /** Stored byte count. */
+  readonly bytes: number;
+  /** `true` when the bytes were already stored (create-time or commit-time dedup). */
+  readonly deduplicated: boolean;
+  /** Which ingress path carried the bytes. */
+  readonly mode: 'single-shot' | 'chunked';
 }
 
 // =============================================================================

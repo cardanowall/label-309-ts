@@ -2,11 +2,11 @@
 //
 // Layer 1 (always on): the verifier resolves every corpus record to its
 // expected verdict whether the conformance deny-list is active OR bypassed,
-// and never issues an outbound call to a cardanowall.com host (the
+// and never issues an outbound call to an operator.example host (the
 // service-independence claim — the verifier needs only public gateways).
 // Layer 2 (opt-in via CARDANOWALL_NXDOMAIN_LAYER2): a direct fetch to
-// cardanowall.com fails DNS, proving the deny-list is the only thing standing
-// between the verifier and the vendor's own infra.
+// operator.example fails DNS, proving the deny-list is the only thing standing
+// between the verifier and the operator's own infrastructure.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -24,14 +24,14 @@ const CORPUS_PATH =
   fileURLToPath(new URL('../fixtures/mainnet-corpus.json', import.meta.url));
 const corpus = MainnetCorpusSchema.parse(JSON.parse(readFileSync(CORPUS_PATH, 'utf8')));
 
-const CONFORMANCE_DENY = ['cardanowall.com', '*.cardanowall.com', 'localhost', '127.0.0.1'];
+const CONFORMANCE_DENY = ['operator.example', '*.operator.example', 'localhost', '127.0.0.1'];
 
-function isCardanoWallHost(url: string): boolean {
+function isDeniedOperatorHost(url: string): boolean {
   const h = new URL(url).hostname
     .toLowerCase()
     .replace(/^\[|\]$/g, '')
     .replace(/\.$/, '');
-  return h === 'cardanowall.com' || h.endsWith('.cardanowall.com');
+  return h === 'operator.example' || h.endsWith('.operator.example');
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -49,8 +49,8 @@ async function verifyCorpusRecord(
   denyHosts: ReadonlyArray<string>,
 ): Promise<Awaited<ReturnType<typeof verifyTx>>> {
   const useBlockfrost = record.provider === 'blockfrost';
+  // The keyring is global to the run; per-item pairing is the verifier's job.
   const decryption = (record.recipient_secret_keys ?? []).map((r) => ({
-    itemIndex: r.item_index,
     recipientSecretKey: hexToBytes(r.secret_key),
   }));
   return verifyTx({
@@ -71,20 +71,20 @@ describe.each(corpus.records.map((r) => [r.tx_hash, r] as const))(
     it('verifies with conformance denyHosts (Layer 1 active)', async () => {
       const result = await verifyCorpusRecord(record, CONFORMANCE_DENY);
       expect(result.verdict).toBe(record.expected_verdict);
-      expect(result.http_calls.every((c) => !isCardanoWallHost(c.url))).toBe(true);
+      expect(result.auditTrail.every((c) => !isDeniedOperatorHost(c.url))).toBe(true);
     });
 
     it('verifies with denyHosts: [] (Layer 1 bypassed)', async () => {
       const result = await verifyCorpusRecord(record, []);
       expect(result.verdict).toBe(record.expected_verdict);
-      expect(result.http_calls.every((c) => !isCardanoWallHost(c.url))).toBe(true);
+      expect(result.auditTrail.every((c) => !isDeniedOperatorHost(c.url))).toBe(true);
     });
 
     it.skipIf(!process.env['CARDANOWALL_NXDOMAIN_LAYER2'])(
-      'rejects direct fetch to cardanowall.com via DNS NXDOMAIN (Layer 2)',
+      'rejects direct fetch to operator.example via DNS NXDOMAIN (Layer 2)',
       async () => {
         await expect(
-          defaultFetchOutbound('https://cardanowall.com/probe', {
+          defaultFetchOutbound('https://operator.example/probe', {
             method: 'GET',
             purpose: 'https',
           }),

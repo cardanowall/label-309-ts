@@ -38,16 +38,17 @@ const VALID_TX = 'a'.repeat(64);
 function fakeReport(overrides: Record<string, unknown>): unknown {
   return {
     verdict: 'valid',
-    exit_code: 0,
-    tx_hash: VALID_TX,
+    exitCode: 0,
+    txHash: VALID_TX,
     profile: 'recipient-sealed',
     network: 'cardano:mainnet',
-    confirmations: 100,
+    confirmationDepth: 100,
+    confirmationThreshold: 15,
+    block_time: 1700000000,
+    issues: [],
     items: [],
-    signatures: [],
-    http_calls: [],
-    info: [],
-    warnings: [],
+    merkle: [],
+    auditTrail: [],
     ...overrides,
   };
 }
@@ -86,7 +87,7 @@ describe('parseArgs', () => {
 
 describe('run — exit codes', () => {
   it('exits 0 on valid verdict', async () => {
-    verifyTxMock.mockResolvedValueOnce(fakeReport({ verdict: 'valid', exit_code: 0 }));
+    verifyTxMock.mockResolvedValueOnce(fakeReport({ verdict: 'valid', exitCode: 0 }));
     const { io, stdout } = makeIO();
     const code = await run([VALID_TX], io);
     expect(code).toBe(0);
@@ -94,19 +95,19 @@ describe('run — exit codes', () => {
   });
 
   it('exits 1 on integrity failure', async () => {
-    verifyTxMock.mockResolvedValueOnce(fakeReport({ verdict: 'failed', exit_code: 1 }));
+    verifyTxMock.mockResolvedValueOnce(fakeReport({ verdict: 'failed', exitCode: 1 }));
     const { io } = makeIO();
     expect(await run([VALID_TX], io)).toBe(1);
   });
 
-  it('exits 2 on network failure', async () => {
-    verifyTxMock.mockResolvedValueOnce(fakeReport({ verdict: 'failed', exit_code: 2 }));
+  it('exits 2 on an unverifiable verdict', async () => {
+    verifyTxMock.mockResolvedValueOnce(fakeReport({ verdict: 'unverifiable', exitCode: 2 }));
     const { io } = makeIO();
     expect(await run([VALID_TX], io)).toBe(2);
   });
 
   it('exits 3 on pending verdict', async () => {
-    verifyTxMock.mockResolvedValueOnce(fakeReport({ verdict: 'pending', exit_code: 3 }));
+    verifyTxMock.mockResolvedValueOnce(fakeReport({ verdict: 'pending', exitCode: 3 }));
     const { io } = makeIO();
     expect(await run([VALID_TX], io)).toBe(3);
   });
@@ -130,10 +131,10 @@ describe('run — exit codes', () => {
     expect(await run(['--bogus', VALID_TX], io)).toBe(4);
   });
 
-  it('exits 2 when verifyTx throws (network class catch-all)', async () => {
-    verifyTxMock.mockRejectedValueOnce(new Error('network down'));
+  it('exits 4 when verifyTx throws (host runtime failure, not record-attributable)', async () => {
+    verifyTxMock.mockRejectedValueOnce(new Error('runtime down'));
     const { io, stderr } = makeIO();
-    expect(await run([VALID_TX], io)).toBe(2);
+    expect(await run([VALID_TX], io)).toBe(4);
     expect(stderr.join('')).toMatch(/verifier error/);
   });
 

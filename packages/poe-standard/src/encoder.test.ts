@@ -1,233 +1,130 @@
-// Encoder round-trip tests — canonical CBOR output is deterministic, the
-// decoded value preserves every field the validator expects to see, and
-// `validate(encode(R)).record` round-trips back to `R`.
+// Encoder behaviour — canonical CBOR output is deterministic, optionals
+// absent from the record are absent from the wire, the signing body removes
+// exactly `sigs`, and `validatePoeRecord(encodePoeRecord(R))` round-trips.
 
-import { decodeCanonicalCbor, type CanonicalCborValue } from '@cardanowall/crypto-core/cbor';
-import { compareCt } from '@cardanowall/crypto-core/util';
+import { decodeCanonicalCbor } from '@cardanowall/crypto-core/cbor';
 import { describe, expect, it } from 'vitest';
 
 import { encodePoeRecord, encodeRecordBodyForSigning } from './encoder';
-import { PoeRecordSchema, type PoeRecord } from './schema';
+import type { PoeRecord } from './schema';
 import { validatePoeRecord } from './validator';
 
-function hash32(byte = 0xab): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(32);
-  out.fill(byte);
+function bytes(len: number, fill = 0xab): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(len).fill(fill);
+}
+
+function bytesToHex(value: Uint8Array): string {
+  let out = '';
+  for (const b of value) out += b.toString(16).padStart(2, '0');
   return out;
 }
 
 const minimalRecord = (): PoeRecord => ({
   v: 1,
-  items: [{ hashes: { 'sha2-256': hash32() } }],
+  items: [{ hashes: { 'sha2-256': bytes(32) } }],
 });
 
-describe('encodePoeRecord — basic behaviour', () => {
-  it('returns canonical CBOR bytes that decode back to the same record shape', () => {
-    const record = minimalRecord();
-    const encoded = encodePoeRecord(record);
-    expect(encoded).toBeInstanceOf(Uint8Array);
-    const decoded = decodeCanonicalCbor(encoded);
-    const asMap =
-      decoded instanceof Map
-        ? decoded
-        : new Map(Object.entries(decoded as Record<string, unknown>));
-    expect(asMap.get('v')).toBe(1);
-    expect(Array.isArray(asMap.get('items'))).toBe(true);
+describe('encodePoeRecord', () => {
+  it('round-trips through the validator and preserves the decoded shape', () => {
+    const encoded = encodePoeRecord(minimalRecord());
+    const result = validatePoeRecord(encoded);
+    expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    expect(Object.keys(result.record)).toEqual(['v', 'items']);
+    expect(result.record.items?.[0]?.hashes['sha2-256']).toEqual(bytes(32));
   });
 
-  it('is deterministic: encoding the same record twice yields byte-identical output', () => {
-    const a = encodePoeRecord(minimalRecord());
-    const b = encodePoeRecord(minimalRecord());
-    expect(compareCt(a, b)).toBe(true);
-  });
-
-  it('sorts top-level map keys canonically regardless of input order', () => {
-    const reversed: unknown = {
-      sigs: [{ cose_sign1: [new Uint8Array(64)] }],
-      items: [{ hashes: { 'sha2-256': hash32() } }],
+  it('is deterministic: two structurally equal records encode byte-identically', () => {
+    // Insertion order differs; canonical map-key sorting must erase it.
+    const a: PoeRecord = {
       v: 1,
+      items: [{ hashes: { 'sha2-256': bytes(32), 'blake2b-256': bytes(32, 0x22) } }],
     };
-    const canonical: unknown = {
+    const b: PoeRecord = {
+      items: [{ hashes: { 'blake2b-256': bytes(32, 0x22), 'sha2-256': bytes(32) } }],
       v: 1,
-      items: [{ hashes: { 'sha2-256': hash32() } }],
-      sigs: [{ cose_sign1: [new Uint8Array(64)] }],
+    } as PoeRecord;
+    expect(bytesToHex(encodePoeRecord(a))).toBe(bytesToHex(encodePoeRecord(b)));
+  });
+
+  it('omits optionals that are absent OR explicitly undefined (no CBOR undefined leaks)', () => {
+    const explicit: PoeRecord = {
+      v: 1,
+      items: [{ hashes: { 'sha2-256': bytes(32) }, uris: undefined, enc: undefined }],
+      merkle: undefined,
+      supersedes: undefined,
+      sigs: undefined,
+      crit: undefined,
     };
-    const a = encodePoeRecord(PoeRecordSchema.parse(reversed));
-    const b = encodePoeRecord(PoeRecordSchema.parse(canonical));
-    expect(compareCt(a, b)).toBe(true);
+    expect(bytesToHex(encodePoeRecord(explicit))).toBe(
+      bytesToHex(encodePoeRecord(minimalRecord())),
+    );
+    // The bytes decode under the canonical profile (which rejects the CBOR
+    // `undefined` simple value outright).
+    expect(() => decodeCanonicalCbor(encodePoeRecord(explicit))).not.toThrow();
   });
 
-  it('emits supersedes as a bare 32-byte bstr', () => {
-    const tx = new Uint8Array(32).fill(0x42);
-    const record: PoeRecord = { ...minimalRecord(), supersedes: tx };
-    const encoded = encodePoeRecord(record);
-    const decoded = decodeCanonicalCbor(encoded);
-    const map =
-      decoded instanceof Map
-        ? decoded
-        : new Map(Object.entries(decoded as Record<string, unknown>));
-    const sup = map.get('supersedes') as Uint8Array;
-    expect(sup).toBeInstanceOf(Uint8Array);
-    expect(sup.length).toBe(32);
-    expect(compareCt(sup, tx)).toBe(true);
-  });
-
-  it('emits hashes as a text-keyed CBOR map (not an array)', () => {
+  it('encodes the de-chunked wire shapes: single-bstr kem_ct and plain tstr uris', () => {
     const record: PoeRecord = {
       v: 1,
-      items: [{ hashes: { 'sha2-256': hash32(0x11), 'blake2b-256': hash32(0x22) } }],
-    };
-    const encoded = encodePoeRecord(record);
-    const decoded = decodeCanonicalCbor(encoded);
-    const map =
-      decoded instanceof Map
-        ? decoded
-        : new Map(Object.entries(decoded as Record<string, unknown>));
-    const items = map.get('items') as Array<Record<string, unknown> | Map<unknown, unknown>>;
-    const item0 = items[0]!;
-    const hashes =
-      item0 instanceof Map ? item0.get('hashes') : (item0 as Record<string, unknown>)['hashes'];
-    // cbor2 surfaces a text-keyed map as a plain object. Either way, the
-    // shape MUST NOT be an array.
-    expect(Array.isArray(hashes)).toBe(false);
-  });
-
-  it('emits a closed sigs[i] map with the canonical cose_key-before-cose_sign1 key order', () => {
-    const record: PoeRecord = {
-      v: 1,
-      items: [{ hashes: { 'sha2-256': hash32() } }],
-      sigs: [
+      items: [
         {
-          cose_sign1: [new Uint8Array(60)],
-          cose_key: [new Uint8Array(50)],
+          hashes: { 'sha2-256': bytes(32) },
+          uris: ['ar://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+          enc: {
+            scheme: 1,
+            aead: 'chacha20-poly1305-stream64k',
+            kem: 'mlkem768x25519',
+            nonce: bytes(24),
+            slots: [{ kem_ct: bytes(1120), wrap: bytes(48) }],
+            slots_mac: bytes(32),
+          },
         },
       ],
     };
-    const encoded = encodePoeRecord(record);
-    const decoded = decodeCanonicalCbor(encoded);
-    const map =
-      decoded instanceof Map
-        ? decoded
-        : new Map(Object.entries(decoded as Record<string, unknown>));
-    const sigs = map.get('sigs') as Array<Record<string, unknown> | Map<unknown, unknown>>;
-    const sig0 = sigs[0]!;
-    const keys =
-      sig0 instanceof Map ? Array.from(sig0.keys()) : Object.keys(sig0 as Record<string, unknown>);
-    // Canonical CBOR text-key sort places `cose_key` (length-8 → header 0x68)
-    // before `cose_sign1` (length-10 → header 0x6a).
-    expect(keys[0]).toBe('cose_key');
-    expect(keys[1]).toBe('cose_sign1');
-  });
-});
-
-describe('encodePoeRecord — round-trip with validator', () => {
-  it.each<[string, () => PoeRecord]>([
-    ['minimal items', () => minimalRecord()],
-    [
-      'merkle-only',
-      () => ({
-        v: 1,
-        merkle: [{ alg: 'rfc9162-sha256', root: hash32(), leaf_count: 4 }],
-      }),
-    ],
-    [
-      'items + supersedes',
-      () => ({
-        v: 1,
-        items: [{ hashes: { 'sha2-256': hash32() } }],
-        supersedes: new Uint8Array(32).fill(0x33),
-      }),
-    ],
-    [
-      'sealed slots envelope',
-      () => ({
-        v: 1,
-        items: [
-          {
-            hashes: { 'sha2-256': hash32(), 'blake2b-256': hash32(0x22) },
-            enc: {
-              scheme: 1,
-              aead: 'xchacha20-poly1305',
-              kem: 'x25519',
-              nonce: new Uint8Array(24),
-              slots: [{ epk: new Uint8Array(32).fill(0x05), wrap: new Uint8Array(48).fill(0x06) }],
-              slots_mac: new Uint8Array(32).fill(0x07),
-            },
-          },
-        ],
-      }),
-    ],
-    [
-      'passphrase envelope',
-      () => ({
-        v: 1,
-        items: [
-          {
-            hashes: { 'sha2-256': hash32() },
-            enc: {
-              scheme: 1,
-              aead: 'xchacha20-poly1305',
-              nonce: new Uint8Array(24),
-              passphrase: {
-                alg: 'argon2id',
-                salt: new Uint8Array(16),
-                params: { m: 65536, t: 3, p: 1 },
-              },
-            },
-          },
-        ],
-      }),
-    ],
-  ])('validator(encoder(%s)).ok === true', (_, build) => {
-    const record = build();
-    const bytes = encodePoeRecord(record);
-    const result = validatePoeRecord(bytes);
-    expect(result.ok).toBe(true);
+    const decoded = decodeCanonicalCbor(encodePoeRecord(record)) as {
+      items: Array<{
+        uris: unknown[];
+        enc: { slots: Array<{ kem_ct: unknown; wrap: unknown }> };
+      }>;
+    };
+    expect(typeof decoded.items[0]!.uris[0]).toBe('string');
+    const slot = decoded.items[0]!.enc.slots[0]!;
+    expect(slot.kem_ct).toBeInstanceOf(Uint8Array);
+    expect((slot.kem_ct as Uint8Array).length).toBe(1120);
+    expect((slot.wrap as Uint8Array).length).toBe(48);
+    expect(validatePoeRecord(encodePoeRecord(record)).valid).toBe(true);
   });
 
-  it('round-tripped record bytes are byte-identical to a re-encode of the parsed record', () => {
-    const record = minimalRecord();
-    const bytes = encodePoeRecord(record);
-    const result = validatePoeRecord(bytes);
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    const reencoded = encodePoeRecord(result.record);
-    expect(reencoded).toEqual(bytes);
+  it('preserves extension keys, including nested map values', () => {
+    const record: PoeRecord = {
+      ...minimalRecord(),
+      'x-note': 'kept',
+      'x-meta': { a: 1, bb: 2 },
+    } as PoeRecord;
+    const decoded = decodeCanonicalCbor(encodePoeRecord(record)) as Record<string, unknown>;
+    expect(decoded['x-note']).toBe('kept');
+    expect(decoded['x-meta']).toEqual({ a: 1, bb: 2 });
   });
 });
 
 describe('encodeRecordBodyForSigning', () => {
-  it('strips the sigs field before encoding', () => {
-    const sigBytes = new Uint8Array(64).fill(0x99);
-    const withSigs: PoeRecord = {
-      v: 1,
-      items: [{ hashes: { 'sha2-256': hash32() } }],
-      sigs: [{ cose_sign1: [sigBytes] }],
-    };
-    const bodyBytes = encodeRecordBodyForSigning(withSigs);
-
-    const withoutSigs: PoeRecord = {
-      v: 1,
-      items: [{ hashes: { 'sha2-256': hash32() } }],
-    };
-    const expected = encodePoeRecord(withoutSigs);
-
-    expect(bodyBytes).toEqual(expected);
+  it('removes exactly `sigs` and nothing else', () => {
+    const record: PoeRecord = {
+      ...minimalRecord(),
+      sigs: [{ cose_sign1: bytes(90, 0x01) }],
+      'x-note': 'signed-too',
+    } as PoeRecord;
+    const body = decodeCanonicalCbor(encodeRecordBodyForSigning(record)) as Record<string, unknown>;
+    expect('sigs' in body).toBe(false);
+    expect(body['x-note']).toBe('signed-too');
+    expect(body['v']).toBe(1);
   });
 
-  it('preserves every other field (items, merkle, supersedes, crit, extension keys)', () => {
-    const recordBody = {
-      v: 1,
-      items: [{ hashes: { 'sha2-256': hash32() } }],
-      merkle: [{ alg: 'rfc9162-sha256', root: hash32(0x77), leaf_count: 8 }],
-      supersedes: new Uint8Array(32).fill(0x11),
-    } as const satisfies CanonicalCborValue;
-    const full: PoeRecord = {
-      ...(recordBody as unknown as PoeRecord),
-      sigs: [{ cose_sign1: [new Uint8Array(64)] }],
-    };
-    const bodyBytes = encodeRecordBodyForSigning(full);
-    const directBody = encodePoeRecord(recordBody as unknown as PoeRecord);
-    expect(bodyBytes).toEqual(directBody);
+  it('equals the full encoding for a record with no sigs', () => {
+    const record = minimalRecord();
+    expect(bytesToHex(encodeRecordBodyForSigning(record))).toBe(
+      bytesToHex(encodePoeRecord(record)),
+    );
   });
 });

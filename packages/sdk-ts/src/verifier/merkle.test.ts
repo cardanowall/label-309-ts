@@ -1,17 +1,20 @@
-// Merkle list-commitment verifier tests. Exercises:
-//   * happy path with caller-supplied leaves (no fetch)
-//   * MERKLE_LEAVES_UNAVAILABLE when no uris[] AND no input.merkleLeaves[i]
-//   * MERKLE_ROOT_MISMATCH when the on-record root disagrees with recompute
-//   * SCHEMA_MERKLE_LEAF_COUNT_MISMATCH when leaf_count disagrees
+// Merkle list-commitment verification tests:
+//   * happy path with caller-supplied (attributable) leaves
+//   * the unavailable outcome when nothing can be obtained
+//   * MERKLE_ROOT_MISMATCH / SCHEMA_MERKLE_LEAF_COUNT_MISMATCH /
+//     SCHEMA_MERKLE_LEAVES_MALFORMED against attributable documents
+//   * the offline (fetchContent:false) reading: deliberately unchecked
 
 import { describe, expect, it } from 'vitest';
 
 import { merkleSha2256Root, sha256 } from '@cardanowall/crypto-core/hash';
 import { encodeLeavesList } from '@cardanowall/crypto-core/merkle';
-import type { PoeRecord } from '@cardanowall/poe-standard';
+import type { MerkleCommit } from '@cardanowall/poe-standard';
 
-import { verifyMerkleCommitments } from './merkle';
-import type { FetchOutbound, VerifyUriCheck } from './types';
+import type { ContentFetchContext } from './content';
+import { IssueSink } from './issues';
+import { checkMerkleCommit } from './merkle';
+import type { FetchOutbound } from './types';
 
 const STUB_FETCH: FetchOutbound = async () => ({
   status: 500,
@@ -19,93 +22,128 @@ const STUB_FETCH: FetchOutbound = async () => ({
   durationMs: 0,
 });
 
+function mkCtx(fetchFn: FetchOutbound = STUB_FETCH): {
+  ctx: ContentFetchContext;
+  issues: IssueSink;
+} {
+  const issues = new IssueSink();
+  return {
+    ctx: {
+      fetchFn,
+      arweaveGateways: ['https://arweave.example'],
+      ipfsGateways: [],
+      issues,
+    },
+    issues,
+  };
+}
+
 function makeLeaves(n: number): Uint8Array[] {
   const out: Uint8Array[] = [];
   for (let i = 0; i < n; i++) out.push(sha256(new Uint8Array([i])));
   return out;
 }
 
-// `PoeRecord['merkle']` declares `root: Uint8Array<ArrayBuffer>` (Zod's
-// `.instanceof(Uint8Array)` infers the strict variant) while @noble/hashes
-// returns `Uint8Array<ArrayBufferLike>`. Coerce through `as unknown` rather
-// than fight the inference per test fixture.
-function asMerkleArray(
-  commits: Array<{ alg: string; root: Uint8Array; leaf_count: number }>,
-): PoeRecord['merkle'] {
-  return commits as unknown as PoeRecord['merkle'];
-}
-
-function recordWith(merkle: PoeRecord['merkle']): PoeRecord {
+function commitOf(
+  leaves: Uint8Array[],
+  overrides: Partial<{ root: Uint8Array; leaf_count: number; uris: string[] }> = {},
+): MerkleCommit {
   return {
-    v: 1,
-    merkle,
-    items: [{ hashes: { 'sha2-256': new Uint8Array(32) } }],
-  } as PoeRecord;
+    alg: 'rfc9162-sha256',
+    root: overrides.root ?? merkleSha2256Root(leaves),
+    leaf_count: overrides.leaf_count ?? leaves.length,
+    ...(overrides.uris !== undefined ? { uris: overrides.uris } : {}),
+  } as unknown as MerkleCommit;
 }
 
-describe('verifyMerkleCommitments', () => {
-  it('happy path — supplied leaves match the on-record root', async () => {
+describe('checkMerkleCommit', () => {
+  it('happy path — supplied leaves-list matches the on-chain commitment', async () => {
     const leaves = makeLeaves(5);
-    const root = merkleSha2256Root(leaves);
-    const leavesBlob = encodeLeavesList({ leaves, root });
-    const record = recordWith(asMerkleArray([{ alg: 'rfc9162-sha256', root, leaf_count: 5 }]));
-    const uri: VerifyUriCheck[] = [];
-    const out = await verifyMerkleCommitments({
-      record,
-      input: { txHash: '0'.repeat(64), merkleLeaves: { 0: leavesBlob } },
-      fetchFn: STUB_FETCH,
-      uriChecksOut: uri,
+    const blob = encodeLeavesList({ leaves, root: merkleSha2256Root(leaves) });
+    const { ctx, issues } = mkCtx();
+    const out = await checkMerkleCommit({
+      commit: commitOf(leaves),
+      commitIndex: 0,
+      outOfBand: blob,
+      fetchContent: true,
+      ctx,
     });
-    expect(out.checks).toHaveLength(1);
-    expect(out.checks[0]!.verdict).toBe('valid');
+    expect(out.contentCheck).toBe('checked');
+    expect(out.unavailable).toBeUndefined();
+    expect(issues.sorted()).toEqual([]);
   });
 
-  it('MERKLE_LEAVES_UNAVAILABLE when no uris and no input bytes', async () => {
+  it('nothing obtainable → unavailable marker (the report assembly resolves the dual severity)', async () => {
     const leaves = makeLeaves(3);
-    const root = merkleSha2256Root(leaves);
-    const record = recordWith(asMerkleArray([{ alg: 'rfc9162-sha256', root, leaf_count: 3 }]));
-    const uri: VerifyUriCheck[] = [];
-    const out = await verifyMerkleCommitments({
-      record,
-      input: { txHash: '0'.repeat(64) },
-      fetchFn: STUB_FETCH,
-      uriChecksOut: uri,
+    const { ctx } = mkCtx();
+    const out = await checkMerkleCommit({
+      commit: commitOf(leaves),
+      commitIndex: 0,
+      fetchContent: true,
+      ctx,
     });
-    expect(out.checks[0]!.verdict).toBe('unavailable');
-    expect(out.checks[0]!.reason).toBe('MERKLE_LEAVES_UNAVAILABLE');
+    expect(out.contentCheck).toBe('not_checked');
+    expect(out.unavailable).toEqual({ path: ['merkle', 0], limitExceeded: false });
   });
 
-  it('MERKLE_ROOT_MISMATCH when on-record root disagrees', async () => {
+  it('offline (fetchContent:false) with no out-of-band document → deliberately unchecked, no marker', async () => {
+    const leaves = makeLeaves(3);
+    const { ctx, issues } = mkCtx();
+    const out = await checkMerkleCommit({
+      commit: commitOf(leaves, { uris: ['ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'] }),
+      commitIndex: 0,
+      fetchContent: false,
+      ctx,
+    });
+    expect(out.contentCheck).toBe('not_checked');
+    expect(out.unavailable).toBeUndefined();
+    expect(issues.sorted()).toEqual([]);
+  });
+
+  it('attributable document whose root disagrees with the on-chain root → MERKLE_ROOT_MISMATCH', async () => {
+    const committed = makeLeaves(4);
+    const other = makeLeaves(4).reverse();
+    const blob = encodeLeavesList({ leaves: other, root: merkleSha2256Root(other) });
+    const { ctx, issues } = mkCtx();
+    const out = await checkMerkleCommit({
+      commit: commitOf(committed),
+      commitIndex: 0,
+      outOfBand: blob,
+      fetchContent: true,
+      ctx,
+    });
+    expect(out.contentCheck).toBe('mismatched');
+    expect(issues.sorted().map((i) => i.code)).toEqual(['MERKLE_ROOT_MISMATCH']);
+  });
+
+  it('leaf-count disagreement against the on-chain commitment → SCHEMA_MERKLE_LEAF_COUNT_MISMATCH', async () => {
     const leaves = makeLeaves(4);
-    const wrongRoot = new Uint8Array(32).fill(0xaa);
-    const leavesBlob = encodeLeavesList({ leaves, root: merkleSha2256Root(leaves) });
-    const record = recordWith(
-      asMerkleArray([{ alg: 'rfc9162-sha256', root: wrongRoot, leaf_count: 4 }]),
-    );
-    const uri: VerifyUriCheck[] = [];
-    const out = await verifyMerkleCommitments({
-      record,
-      input: { txHash: '0'.repeat(64), merkleLeaves: { 0: leavesBlob } },
-      fetchFn: STUB_FETCH,
-      uriChecksOut: uri,
+    const blob = encodeLeavesList({ leaves, root: merkleSha2256Root(leaves) });
+    const { ctx, issues } = mkCtx();
+    const out = await checkMerkleCommit({
+      // The on-chain commitment declares a different leaf_count than the
+      // (internally consistent) document carries.
+      commit: commitOf(leaves, { leaf_count: 5 }),
+      commitIndex: 0,
+      outOfBand: blob,
+      fetchContent: true,
+      ctx,
     });
-    expect(out.checks[0]!.verdict).toBe('mismatch');
-    expect(out.checks[0]!.reason).toBe('MERKLE_ROOT_MISMATCH');
+    expect(out.contentCheck).toBe('mismatched');
+    expect(issues.sorted().map((i) => i.code)).toEqual(['SCHEMA_MERKLE_LEAF_COUNT_MISMATCH']);
   });
 
-  it('SCHEMA_MERKLE_LEAF_COUNT_MISMATCH when on-record count disagrees', async () => {
-    const leaves = makeLeaves(7);
-    const root = merkleSha2256Root(leaves);
-    const leavesBlob = encodeLeavesList({ leaves, root });
-    const record = recordWith(asMerkleArray([{ alg: 'rfc9162-sha256', root, leaf_count: 999 }]));
-    const uri: VerifyUriCheck[] = [];
-    const out = await verifyMerkleCommitments({
-      record,
-      input: { txHash: '0'.repeat(64), merkleLeaves: { 0: leavesBlob } },
-      fetchFn: STUB_FETCH,
-      uriChecksOut: uri,
+  it('bytes that are not the leaves-list container → SCHEMA_MERKLE_LEAVES_MALFORMED', async () => {
+    const leaves = makeLeaves(2);
+    const { ctx, issues } = mkCtx();
+    const out = await checkMerkleCommit({
+      commit: commitOf(leaves),
+      commitIndex: 0,
+      outOfBand: new TextEncoder().encode('not a leaves list'),
+      fetchContent: true,
+      ctx,
     });
-    expect(out.checks[0]!.verdict).toBe('mismatch');
-    expect(out.checks[0]!.reason).toBe('SCHEMA_MERKLE_LEAF_COUNT_MISMATCH');
+    expect(out.contentCheck).toBe('mismatched');
+    expect(issues.sorted().map((i) => i.code)).toEqual(['SCHEMA_MERKLE_LEAVES_MALFORMED']);
   });
 });

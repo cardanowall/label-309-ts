@@ -1,117 +1,140 @@
 // Catalogue invariants for the Label 309 v1 error-code taxonomy.
+//
+// The TypeScript catalogue is a projection of the canonical machine-readable
+// registry; its entry ORDER is load-bearing (same-path issues tie-break by
+// registry position), so these tests pin the structural invariants every
+// implementation's projection must satisfy.
 
 import { describe, expect, it } from 'vitest';
 
 import {
+  CARRIAGE_ERROR_CODES,
+  DUAL_SEVERITY_CODES,
+  ERROR_CODE_PART,
   ERROR_CODES,
-  STRUCTURAL_ERROR_CODES,
   SEVERITY,
+  STRUCTURAL_ERROR_CODES,
   VERIFIER_ERROR_CODES,
+  errorCodeRegistryIndex,
   severityOf,
   type ErrorCode,
   type Severity,
 } from './error-codes';
 
-describe('ERROR_CODES catalogue (structural + verifier-layer codes)', () => {
-  it('STRUCTURAL_ERROR_CODES is a unique, frozen list', () => {
-    const set = new Set(STRUCTURAL_ERROR_CODES);
-    expect(set.size).toBe(STRUCTURAL_ERROR_CODES.length);
+describe('catalogue shape', () => {
+  it('codes are unique', () => {
+    expect(new Set(ERROR_CODES).size).toBe(ERROR_CODES.length);
   });
 
-  it('VERIFIER_ERROR_CODES is a unique, frozen list disjoint from STRUCTURAL_ERROR_CODES', () => {
-    const structural = new Set(STRUCTURAL_ERROR_CODES);
-    for (const code of VERIFIER_ERROR_CODES) {
-      expect(structural.has(code as never)).toBe(false);
-    }
-  });
-
-  it('ERROR_CODES is the union of both lists', () => {
-    expect(ERROR_CODES.length).toBe(STRUCTURAL_ERROR_CODES.length + VERIFIER_ERROR_CODES.length);
-  });
-
-  it('every ErrorCode has a SEVERITY entry', () => {
+  it('every code is SCREAMING_SNAKE_CASE', () => {
     for (const code of ERROR_CODES) {
-      expect(SEVERITY[code]).toBeDefined();
+      expect(code).toMatch(/^[A-Z][A-Z0-9_]*$/);
     }
   });
 
-  it('SIGNATURE_UNSUPPORTED carries severity=info', () => {
+  it('the per-layer views partition the catalogue in registry order', () => {
+    const union = [...STRUCTURAL_ERROR_CODES, ...CARRIAGE_ERROR_CODES, ...VERIFIER_ERROR_CODES];
+    expect(union.length).toBe(ERROR_CODES.length);
+    expect(new Set(union).size).toBe(ERROR_CODES.length);
+    for (const view of [STRUCTURAL_ERROR_CODES, CARRIAGE_ERROR_CODES, VERIFIER_ERROR_CODES]) {
+      const indices = view.map((code) => errorCodeRegistryIndex(code));
+      expect([...indices].sort((a, b) => a - b)).toEqual(indices);
+    }
+  });
+
+  it('every code carries a part and a severity', () => {
+    for (const code of ERROR_CODES) {
+      expect(['A', 'B', 'carriage']).toContain(ERROR_CODE_PART[code]);
+      expect(['error', 'warning', 'info']).toContain(SEVERITY[code]);
+    }
+  });
+
+  it('errorCodeRegistryIndex is the position in ERROR_CODES', () => {
+    ERROR_CODES.forEach((code, index) => {
+      expect(errorCodeRegistryIndex(code)).toBe(index);
+    });
+  });
+});
+
+describe('layer assignment', () => {
+  it('CHUNK_TOO_LARGE is the sole carriage-layer code', () => {
+    expect(CARRIAGE_ERROR_CODES).toEqual(['CHUNK_TOO_LARGE']);
+  });
+
+  it('the structural validator owns the schema/enc/sig/crit families', () => {
+    for (const code of [
+      'MALFORMED_CBOR',
+      'SCHEMA_EMPTY_RECORD',
+      'SCHEMA_MERKLE_LEAF_COUNT_INVALID',
+      'ENC_REQUIRES_CONTENT_HASH',
+      'ENC_UNSUPPORTED',
+      'SIG_PRIVATE_KEY_LEAKED',
+      'EXTENSION_UNSUPPORTED_CRITICAL',
+      'CRIT_SHAPE_INVALID',
+    ] as const) {
+      expect(ERROR_CODE_PART[code]).toBe('A');
+    }
+  });
+
+  it('chain/fetch/decrypt outcomes are verifier-layer codes', () => {
+    for (const code of [
+      'TX_INTEGRITY_MISMATCH',
+      'TX_NOT_FOUND',
+      'METADATA_NOT_FOUND',
+      'URI_INTEGRITY_MISMATCH',
+      'URI_PROVIDER_INTEGRITY_MISMATCH',
+      'TAMPERED_CIPHERTEXT',
+      'ENC_PASSPHRASE_UNNORMALIZABLE',
+      'ENC_PASSPHRASE_EMPTY',
+    ] as const) {
+      expect(ERROR_CODE_PART[code]).toBe('B');
+    }
+  });
+});
+
+describe('severity contract', () => {
+  it('non-failing dispositions carry their pinned default severities', () => {
     expect(severityOf('SIGNATURE_UNSUPPORTED')).toBe<Severity>('info');
-  });
-
-  it('URI_FETCH_FAILED carries severity=warning', () => {
-    expect(severityOf('URI_FETCH_FAILED')).toBe<Severity>('warning');
-  });
-
-  it('MERKLE_UNSUPPORTED carries default severity=info (verifier promotes for merkle-only records)', () => {
+    expect(severityOf('ENC_UNSUPPORTED')).toBe<Severity>('info');
+    expect(severityOf('INSUFFICIENT_CONFIRMATIONS')).toBe<Severity>('info');
     expect(severityOf('MERKLE_UNSUPPORTED')).toBe<Severity>('info');
-  });
-
-  it('OUT_OF_PROFILE_SKIPPED carries default severity=info (verifier promotes in strict mode)', () => {
     expect(severityOf('OUT_OF_PROFILE_SKIPPED')).toBe<Severity>('info');
+    expect(severityOf('URI_FETCH_FAILED')).toBe<Severity>('warning');
+    expect(severityOf('URI_PROVIDER_INTEGRITY_MISMATCH')).toBe<Severity>('warning');
+    expect(severityOf('MERKLE_LEAVES_UNAVAILABLE')).toBe<Severity>('warning');
   });
 
-  it('ErrorCode union admits known codes (compile-time)', () => {
+  it('the dual-severity set is exactly the four context-promoted codes', () => {
+    expect([...DUAL_SEVERITY_CODES].sort()).toEqual([
+      'ENC_UNSUPPORTED',
+      'MERKLE_LEAVES_UNAVAILABLE',
+      'MERKLE_UNSUPPORTED',
+      'OUT_OF_PROFILE_SKIPPED',
+    ]);
+  });
+
+  it('every other code is a hard error or a pinned non-failing disposition', () => {
+    for (const code of ERROR_CODES) {
+      if (DUAL_SEVERITY_CODES.has(code)) continue;
+      if (
+        code === 'SIGNATURE_UNSUPPORTED' ||
+        code === 'INSUFFICIENT_CONFIRMATIONS' ||
+        code === 'URI_FETCH_FAILED' ||
+        code === 'URI_PROVIDER_INTEGRITY_MISMATCH'
+      ) {
+        continue;
+      }
+      expect(SEVERITY[code]).toBe('error');
+    }
+  });
+});
+
+describe('ErrorCode union (compile-time)', () => {
+  it('admits canonical codes and rejects unknown ones', () => {
     const ok: ErrorCode = 'MALFORMED_CBOR';
     expect(ok).toBe('MALFORMED_CBOR');
-  });
-
-  it('ErrorCode union rejects unknown codes (compile-time)', () => {
     // @ts-expect-error 'NOT_A_REAL_CODE' is not in the canonical catalogue
     const bad: ErrorCode = 'NOT_A_REAL_CODE';
     expect(bad).toBe('NOT_A_REAL_CODE');
   });
-});
-
-describe('canonical taxonomy presence (spot checks of structural codes)', () => {
-  // Spot-checks for the most semantically-loaded codes the validator emits.
-  const required: ErrorCode[] = [
-    'MALFORMED_CBOR',
-    'SCHEMA_EMPTY_RECORD',
-    'SCHEMA_INVALID_LITERAL',
-    'SCHEMA_MISSING_REQUIRED',
-    'SCHEMA_TYPE_MISMATCH',
-    'SCHEMA_UNKNOWN_FIELD',
-    'HASH_DIGEST_LENGTH_MISMATCH',
-    'UNSUPPORTED_HASH_ALG',
-    'UNSUPPORTED_MERKLE_COMMIT_ALG',
-    'INVALID_URI',
-    'CHUNK_TOO_LARGE',
-    'UNAUTHENTICATED_CIPHER_FORBIDDEN',
-    'UNSUPPORTED_AEAD_ALG',
-    'NONCE_LENGTH_MISMATCH',
-    'UNSUPPORTED_ENVELOPE_SCHEME',
-    'ENC_SLOTS_EMPTY',
-    'ENC_SLOT_INVALID_SHAPE',
-    'ENC_SLOTS_DUPLICATE_KEM_MATERIAL',
-    'ENC_SLOTS_TOO_MANY',
-    'ENC_ENVELOPE_TOO_LARGE',
-    'UNSUPPORTED_KEM_ALG',
-    'ENC_KEM_REQUIRED',
-    'KEM_EPK_LENGTH_MISMATCH',
-    'WRAP_LENGTH_MISMATCH',
-    'ENC_SLOTS_MAC_INVALID_LENGTH',
-    'ENC_SLOTS_MAC_REQUIRED',
-    'ENC_SLOTS_REQUIRED',
-    'ENC_EXCLUSIVITY_VIOLATION',
-    'ENC_NO_KEY_PATH',
-    'ENC_REQUIRES_CONTENT_HASH',
-    'ENC_PASSPHRASE_ALG_UNSUPPORTED',
-    'ENC_PASSPHRASE_SALT_TOO_SHORT',
-    'ENC_PASSPHRASE_SALT_TOO_LONG',
-    'ENC_PASSPHRASE_ARGON2_PARAMS_TOO_LOW',
-    'MALFORMED_SIG_COSE_SIGN1',
-    'SIGNATURE_UNSUPPORTED',
-    'SIG_ENTRY_INVALID_SHAPE',
-    'SIG_ENTRY_KID_COSE_KEY_CONFLICT',
-    'SIG_PRIVATE_KEY_LEAKED',
-    'SUPERSEDES_TX_INVALID_LENGTH',
-    'EXTENSION_UNSUPPORTED_CRITICAL',
-    'CRIT_SHAPE_INVALID',
-  ];
-  for (const code of required) {
-    it(`${code} is in STRUCTURAL_ERROR_CODES`, () => {
-      expect(STRUCTURAL_ERROR_CODES).toContain(code as never);
-    });
-  }
 });

@@ -15,12 +15,15 @@ import {
   type UnwrapArgs,
   type UnwrapArgsMultiPriv,
 } from './unwrap';
-import { type SealedEnvelope } from './wrap';
+import { SEALED_POE_AEAD, type SealedEnvelope } from './wrap';
+import type { ItemHashes } from './transcript';
 
 interface UnlockedIdentityKeysShape {
   readonly x25519PrivateKeys: ReadonlyArray<Uint8Array>;
   readonly mlkem768x25519SecretSeed: Uint8Array;
 }
+
+const HASHES: ItemHashes = { 'sha2-256': new Uint8Array(32) };
 
 describe('iterator surface consumer-shape contract', () => {
   it('reversed-newest-first ordering is assignable to recipientSecretKeys', () => {
@@ -33,7 +36,7 @@ describe('iterator surface consumer-shape contract', () => {
 
     const envelope: SealedEnvelope = {
       scheme: 1,
-      aead: 'xchacha20-poly1305',
+      aead: SEALED_POE_AEAD,
       kem: 'x25519',
       nonce: new Uint8Array(24),
       slots: [{ epk: new Uint8Array(32), wrap: new Uint8Array(48) }],
@@ -42,6 +45,7 @@ describe('iterator surface consumer-shape contract', () => {
     const args: UnwrapArgsMultiPriv = {
       envelope,
       ciphertext: new Uint8Array(0),
+      hashes: HASHES,
       recipientSecretKeys: ordered,
     };
     expectTypeOf(args).toExtend<UnwrapArgs>();
@@ -55,7 +59,7 @@ describe('iterator surface consumer-shape contract', () => {
     const ordered: ReadonlyArray<Uint8Array> = [keys[0]!, ...keys.slice(1).reverse()];
     const envelope: SealedEnvelope = {
       scheme: 1,
-      aead: 'xchacha20-poly1305',
+      aead: SEALED_POE_AEAD,
       kem: 'x25519',
       nonce: new Uint8Array(24),
       slots: [{ epk: new Uint8Array(32), wrap: new Uint8Array(48) }],
@@ -63,13 +67,15 @@ describe('iterator surface consumer-shape contract', () => {
     };
     const args: TrialDecryptOnlyArgs = {
       envelope,
+      hashes: HASHES,
       recipientSecretKeys: ordered,
     };
     expectTypeOf(args).toExtend<TrialDecryptOnlyArgs>();
+    // Binary result contract: per-slot acceptance folds the MAC, so the only
+    // outcomes are a full match or no match.
     expectTypeOf<TrialDecryptOnlyResult>().toExtend<
       | { readonly kind: 'match'; readonly slotIdx: number; readonly cek: Uint8Array }
-      | { readonly kind: 'no_aead_pass' }
-      | { readonly kind: 'aead_pass_no_mac_match' }
+      | { readonly kind: 'no_match' }
     >();
   });
 
@@ -90,17 +96,22 @@ describe('iterator surface consumer-shape contract', () => {
     };
     const envelope: SealedEnvelope = {
       scheme: 1,
-      aead: 'xchacha20-poly1305',
+      aead: SEALED_POE_AEAD,
       kem: 'mlkem768x25519',
       nonce: new Uint8Array(24),
-      slots: [{ kem_ct: [new Uint8Array(64)], wrap: new Uint8Array(48) }],
+      slots: [{ kem_ct: new Uint8Array(1120), wrap: new Uint8Array(48) }],
       slots_mac: new Uint8Array(32),
     };
-    const trialArgs: TrialDecryptOnlyArgs = { envelope, recipientKeyBundle: bundle };
+    const trialArgs: TrialDecryptOnlyArgs = {
+      envelope,
+      hashes: HASHES,
+      recipientKeyBundle: bundle,
+    };
     expectTypeOf(trialArgs).toExtend<TrialDecryptOnlyArgs>();
     const unwrapArgs: UnwrapArgs = {
       envelope,
       ciphertext: new Uint8Array(0),
+      hashes: HASHES,
       recipientKeyBundle: bundle,
     };
     expectTypeOf(unwrapArgs).toExtend<UnwrapArgs>();

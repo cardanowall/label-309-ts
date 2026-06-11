@@ -8,6 +8,7 @@
 //   • an empty selected list is a clean non-match, never a throw, and never
 //     invokes a KEM primitive on the other list.
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import { describe, expect, it } from 'vitest';
 
 import { mlkem768x25519Keygen } from '../kem/mlkem768x25519';
@@ -15,6 +16,7 @@ import { x25519PublicKey } from '../kem/x25519';
 
 import { eciesSealedPoeTrialDecrypt, eciesSealedPoeUnwrap } from './unwrap';
 import { eciesSealedPoeWrap } from './wrap';
+import type { ItemHashes } from './transcript';
 
 function fillBytes(b: number, n: number): Uint8Array {
   const out = new Uint8Array(n);
@@ -23,12 +25,14 @@ function fillBytes(b: number, n: number): Uint8Array {
 }
 
 const PLAINTEXT = new TextEncoder().encode('bundle-dispatch-roundtrip');
+const HASHES: ItemHashes = { 'sha2-256': sha256(PLAINTEXT) };
 
 describe('RecipientKeyBundle dispatch — classical envelope', () => {
   const recipientPriv = fillBytes(0x21, 32);
   const recipientPub = x25519PublicKey({ secretKey: recipientPriv });
   const sealed = eciesSealedPoeWrap({
     plaintext: PLAINTEXT,
+    hashes: HASHES,
     recipientPublicKeys: [recipientPub],
     cek: fillBytes(0x33, 32),
     nonce: fillBytes(0x44, 24),
@@ -40,6 +44,7 @@ describe('RecipientKeyBundle dispatch — classical envelope', () => {
     const res = eciesSealedPoeUnwrap({
       envelope: sealed.envelope,
       ciphertext: sealed.ciphertext,
+      hashes: HASHES,
       recipientKeyBundle: {
         x25519PrivateKeys: [recipientPriv],
         // A non-matching hybrid seed must not interfere — the dispatch never
@@ -54,10 +59,12 @@ describe('RecipientKeyBundle dispatch — classical envelope', () => {
   it('bundle trial-decrypt matches the flat-list trial-decrypt byte-for-byte', () => {
     const flat = eciesSealedPoeTrialDecrypt({
       envelope: sealed.envelope,
+      hashes: HASHES,
       recipientSecretKeys: [recipientPriv],
     });
     const bundled = eciesSealedPoeTrialDecrypt({
       envelope: sealed.envelope,
+      hashes: HASHES,
       recipientKeyBundle: {
         x25519PrivateKeys: [recipientPriv],
         mlkem768x25519SecretSeeds: [],
@@ -75,6 +82,7 @@ describe('RecipientKeyBundle dispatch — classical envelope', () => {
     const res = eciesSealedPoeUnwrap({
       envelope: sealed.envelope,
       ciphertext: sealed.ciphertext,
+      hashes: HASHES,
       recipientKeyBundle: {
         x25519PrivateKeys: [],
         mlkem768x25519SecretSeeds: [fillBytes(0x01, 32)],
@@ -85,9 +93,10 @@ describe('RecipientKeyBundle dispatch — classical envelope', () => {
 
     const trial = eciesSealedPoeTrialDecrypt({
       envelope: sealed.envelope,
+      hashes: HASHES,
       recipientKeyBundle: { x25519PrivateKeys: [], mlkem768x25519SecretSeeds: [] },
     });
-    expect(trial.kind).toBe('no_aead_pass');
+    expect(trial.kind).toBe('no_match');
   });
 });
 
@@ -96,6 +105,7 @@ describe('RecipientKeyBundle dispatch — hybrid envelope', () => {
   const recipient = mlkem768x25519Keygen(seed);
   const sealed = eciesSealedPoeWrap({
     plaintext: PLAINTEXT,
+    hashes: HASHES,
     recipientPublicKeys: [recipient.publicKey],
     kem: 'mlkem768x25519',
     cek: fillBytes(0xab, 32),
@@ -108,6 +118,7 @@ describe('RecipientKeyBundle dispatch — hybrid envelope', () => {
     const res = eciesSealedPoeUnwrap({
       envelope: sealed.envelope,
       ciphertext: sealed.ciphertext,
+      hashes: HASHES,
       recipientKeyBundle: {
         x25519PrivateKeys: [fillBytes(0x99, 32)],
         mlkem768x25519SecretSeeds: [recipient.secretSeed],
@@ -120,12 +131,13 @@ describe('RecipientKeyBundle dispatch — hybrid envelope', () => {
   it('empty hybrid seed list (archived-only identity facing hybrid record) → clean non-match', () => {
     const res = eciesSealedPoeTrialDecrypt({
       envelope: sealed.envelope,
+      hashes: HASHES,
       recipientKeyBundle: {
         // Holds only classical privs — cannot read a hybrid record.
         x25519PrivateKeys: [fillBytes(0x21, 32)],
         mlkem768x25519SecretSeeds: [],
       },
     });
-    expect(res.kind).toBe('no_aead_pass');
+    expect(res.kind).toBe('no_match');
   });
 });

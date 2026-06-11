@@ -21,6 +21,7 @@ import {
 } from '@cardanowall/crypto-core/recipient';
 import {
   eciesSealedPoeUnwrap,
+  type ItemHashes,
   type RecipientKeyBundle,
   type SealedEnvelope,
   type UnwrapResult,
@@ -97,6 +98,11 @@ export interface DecryptSealedFromSeedArgs {
   readonly seed: Uint8Array;
   readonly envelope: SealedEnvelope;
   readonly ciphertext: Uint8Array;
+  // The item's plaintext-hash claim, exactly as carried in the record body.
+  // Load-bearing for decryption: the hashes map is bound into the slots
+  // transcript, so a slot only accepts when the envelope sits under the same
+  // hashes claim it was sealed for.
+  readonly hashes: ItemHashes;
 }
 
 // Decrypt a sealed PoE envelope + ciphertext from the seed. Builds the bundle
@@ -109,6 +115,7 @@ export function decryptSealedFromSeed(args: DecryptSealedFromSeedArgs): UnwrapRe
   return eciesSealedPoeUnwrap({
     envelope: args.envelope,
     ciphertext: args.ciphertext,
+    hashes: args.hashes,
     recipientKeyBundle: recipientKeyBundleFromSeed(args.seed),
   });
 }

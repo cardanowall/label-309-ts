@@ -1,52 +1,45 @@
-// Label 309 v1 error-code catalogue — single source of truth for the
-// structural-validator codes (Part A) and the verifier-layer codes (Part B)
-// that downstream verifiers re-export from this package.
+// Label 309 v1 error-code catalogue — the TypeScript projection of the
+// machine-readable registry (`error-codes.json` in the Label 309 distribution).
 //
-// The structural validator emits ONLY Part A codes. Part B codes are
-// re-exported so consumers can `import { ErrorCode } from '@cardanowall/poe-standard'`
-// and dispatch on a single union type without round-tripping through the
-// verifier package.
+// Three layers emit these codes:
+//   - Part A      — the structural validator (`validatePoeRecord`): a pure
+//                   function over the reassembled CBOR record body.
+//   - carriage    — the pre-validator transport step that reassembles the
+//                   label-309 chunk array (`reassembleLabel309Value`).
+//   - Part B      — the public / recipient verifier (chain resolution,
+//                   signature verification, content fetch, decryption).
+//                   Re-exported here so downstream verifiers dispatch on a
+//                   single `ErrorCode` union.
 //
-// Codes are SCREAMING_SNAKE_CASE and MUST match the canonical taxonomy
+// Codes are SCREAMING_SNAKE_CASE and MUST match the canonical catalogue
 // byte-exact across the TS/PY/RS implementations — no lowercase synonyms,
-// no `schema_*`-prefixed parser-internal codes.
+// no parser-internal codes, no free-form reason strings.
+//
+// `ERROR_CODES` preserves the registry's entry order. That order is
+// load-bearing: issues sharing an identical path tie-break by the order in
+// which their codes appear in the registry, so the list below doubles as the
+// cross-implementation sort key (`errorCodeRegistryIndex`).
 
-// =============================================================================
-// Part A — structural validator codes
-// =============================================================================
-export const STRUCTURAL_ERROR_CODES = [
-  // CBOR decode layer. A single code covers every canonical-decode failure —
-  // malformed/truncated bytes, indefinite-length encodings, non-canonical
-  // (unsorted) map-key ordering, duplicate map keys, non-minimal integers, and
-  // invalid UTF-8 — by design (no separate duplicate-key code).
+export const ERROR_CODES = [
   'MALFORMED_CBOR',
-  // Generic schema-layer
   'SCHEMA_TYPE_MISMATCH',
   'SCHEMA_MISSING_REQUIRED',
   'SCHEMA_UNKNOWN_FIELD',
   'SCHEMA_INVALID_LITERAL',
   'SCHEMA_EMPTY_RECORD',
-  // Hash-map
   'HASH_DIGEST_LENGTH_MISMATCH',
   'UNSUPPORTED_HASH_ALG',
-  // Top-level `merkle[]`
   'UNSUPPORTED_MERKLE_COMMIT_ALG',
-  // URI / chunking. A chunk whose bytes do not reconstruct to valid UTF-8
-  // surfaces as MALFORMED_CBOR at decode (cbor2 rejects invalid-UTF-8 tstr)
-  // or, in the residual reconstruct guard, as INVALID_URI — there is no
-  // separate codepoint-split code.
+  'SCHEMA_MERKLE_LEAF_COUNT_INVALID',
   'INVALID_URI',
   'CHUNK_TOO_LARGE',
-  // Encryption envelope
   'UNAUTHENTICATED_CIPHER_FORBIDDEN',
   'UNSUPPORTED_AEAD_ALG',
   'NONCE_LENGTH_MISMATCH',
   'UNSUPPORTED_ENVELOPE_SCHEME',
+  'ENC_UNSUPPORTED',
   'ENC_SLOTS_EMPTY',
   'ENC_SLOT_INVALID_SHAPE',
-  'ENC_SLOTS_DUPLICATE_KEM_MATERIAL',
-  'ENC_SLOTS_TOO_MANY',
-  'ENC_ENVELOPE_TOO_LARGE',
   'UNSUPPORTED_KEM_ALG',
   'ENC_KEM_REQUIRED',
   'KEM_EPK_LENGTH_MISMATCH',
@@ -55,6 +48,9 @@ export const STRUCTURAL_ERROR_CODES = [
   'ENC_SLOTS_MAC_INVALID_LENGTH',
   'ENC_SLOTS_MAC_REQUIRED',
   'ENC_SLOTS_REQUIRED',
+  'ENC_SLOTS_DUPLICATE_KEM_MATERIAL',
+  'ENC_SLOTS_TOO_MANY',
+  'ENC_ENVELOPE_TOO_LARGE',
   'ENC_EXCLUSIVITY_VIOLATION',
   'ENC_NO_KEY_PATH',
   'ENC_REQUIRES_CONTENT_HASH',
@@ -63,25 +59,17 @@ export const STRUCTURAL_ERROR_CODES = [
   'ENC_PASSPHRASE_SALT_TOO_LONG',
   'ENC_PASSPHRASE_ARGON2_PARAMS_TOO_LOW',
   'ENC_PASSPHRASE_PARAMS_EXCEED_POLICY',
-  // Signatures
   'MALFORMED_SIG_COSE_SIGN1',
   'SIGNATURE_UNSUPPORTED',
   'SIG_ENTRY_INVALID_SHAPE',
   'SIG_ENTRY_KID_COSE_KEY_CONFLICT',
   'SIG_PRIVATE_KEY_LEAKED',
-  // Supersedence
   'SUPERSEDES_TX_INVALID_LENGTH',
-  // Forward-compat critical extensions
   'EXTENSION_UNSUPPORTED_CRITICAL',
   'CRIT_SHAPE_INVALID',
-] as const;
-
-// =============================================================================
-// Part B — verifier-layer codes
-// Re-exported so downstream verifiers can dispatch on a single union.
-// The structural validator NEVER emits these.
-// =============================================================================
-export const VERIFIER_ERROR_CODES = [
+  'TX_NOT_FOUND',
+  'PROVIDER_UNAVAILABLE',
+  'TX_INTEGRITY_MISMATCH',
   'METADATA_NOT_FOUND',
   'INSUFFICIENT_CONFIRMATIONS',
   'SIGNATURE_INVALID',
@@ -89,49 +77,153 @@ export const VERIFIER_ERROR_CODES = [
   'WALLET_ADDRESS_MISMATCH',
   'URI_TARGET_FORBIDDEN',
   'URI_INTEGRITY_MISMATCH',
+  'URI_PROVIDER_INTEGRITY_MISMATCH',
   'URI_FETCH_FAILED',
   'CONTENT_UNAVAILABLE',
+  'CONTENT_FETCH_LIMIT_EXCEEDED',
   'CIPHERTEXT_UNAVAILABLE',
-  'PROVIDER_UNAVAILABLE',
   'SERVICE_INDEPENDENCE_VIOLATION',
   'WRONG_DECRYPTION_INPUT_SHAPE',
   'WRONG_RECIPIENT_KEY',
   'TAMPERED_HEADER',
   'TAMPERED_CIPHERTEXT',
   'KDF_DERIVATION_FAILED',
+  'ENC_PASSPHRASE_UNNORMALIZABLE',
+  'ENC_PASSPHRASE_EMPTY',
   'SCHEMA_MERKLE_LEAF_COUNT_MISMATCH',
   'SCHEMA_MERKLE_LEAVES_FORMAT_UNSUPPORTED',
   'SCHEMA_MERKLE_LEAVES_MALFORMED',
   'MERKLE_ROOT_MISMATCH',
   'MERKLE_LEAVES_UNAVAILABLE',
-  'MERKLE_LEAVES_INFORMATIVE_FORM',
   'MERKLE_UNSUPPORTED',
   'OUT_OF_PROFILE_SKIPPED',
 ] as const;
 
-export const ERROR_CODES = [...STRUCTURAL_ERROR_CODES, ...VERIFIER_ERROR_CODES] as const;
-
-export type StructuralErrorCode = (typeof STRUCTURAL_ERROR_CODES)[number];
-export type VerifierErrorCode = (typeof VERIFIER_ERROR_CODES)[number];
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
-// Severity classification. Codes not listed are `error` by default.
+// =============================================================================
+// Emitting layer (`part` in the registry)
+// =============================================================================
+
+export type ErrorCodePart = 'A' | 'B' | 'carriage';
+
+export const ERROR_CODE_PART: Readonly<Record<ErrorCode, ErrorCodePart>> = Object.freeze({
+  MALFORMED_CBOR: 'A',
+  SCHEMA_TYPE_MISMATCH: 'A',
+  SCHEMA_MISSING_REQUIRED: 'A',
+  SCHEMA_UNKNOWN_FIELD: 'A',
+  SCHEMA_INVALID_LITERAL: 'A',
+  SCHEMA_EMPTY_RECORD: 'A',
+  HASH_DIGEST_LENGTH_MISMATCH: 'A',
+  UNSUPPORTED_HASH_ALG: 'A',
+  UNSUPPORTED_MERKLE_COMMIT_ALG: 'A',
+  SCHEMA_MERKLE_LEAF_COUNT_INVALID: 'A',
+  INVALID_URI: 'A',
+  CHUNK_TOO_LARGE: 'carriage',
+  UNAUTHENTICATED_CIPHER_FORBIDDEN: 'A',
+  UNSUPPORTED_AEAD_ALG: 'A',
+  NONCE_LENGTH_MISMATCH: 'A',
+  UNSUPPORTED_ENVELOPE_SCHEME: 'A',
+  ENC_UNSUPPORTED: 'A',
+  ENC_SLOTS_EMPTY: 'A',
+  ENC_SLOT_INVALID_SHAPE: 'A',
+  UNSUPPORTED_KEM_ALG: 'A',
+  ENC_KEM_REQUIRED: 'A',
+  KEM_EPK_LENGTH_MISMATCH: 'A',
+  KEM_CT_LENGTH_MISMATCH: 'A',
+  WRAP_LENGTH_MISMATCH: 'A',
+  ENC_SLOTS_MAC_INVALID_LENGTH: 'A',
+  ENC_SLOTS_MAC_REQUIRED: 'A',
+  ENC_SLOTS_REQUIRED: 'A',
+  ENC_SLOTS_DUPLICATE_KEM_MATERIAL: 'A',
+  ENC_SLOTS_TOO_MANY: 'A',
+  ENC_ENVELOPE_TOO_LARGE: 'A',
+  ENC_EXCLUSIVITY_VIOLATION: 'A',
+  ENC_NO_KEY_PATH: 'A',
+  ENC_REQUIRES_CONTENT_HASH: 'A',
+  ENC_PASSPHRASE_ALG_UNSUPPORTED: 'A',
+  ENC_PASSPHRASE_SALT_TOO_SHORT: 'A',
+  ENC_PASSPHRASE_SALT_TOO_LONG: 'A',
+  ENC_PASSPHRASE_ARGON2_PARAMS_TOO_LOW: 'A',
+  ENC_PASSPHRASE_PARAMS_EXCEED_POLICY: 'A',
+  MALFORMED_SIG_COSE_SIGN1: 'A',
+  SIGNATURE_UNSUPPORTED: 'A',
+  SIG_ENTRY_INVALID_SHAPE: 'A',
+  SIG_ENTRY_KID_COSE_KEY_CONFLICT: 'A',
+  SIG_PRIVATE_KEY_LEAKED: 'A',
+  SUPERSEDES_TX_INVALID_LENGTH: 'A',
+  EXTENSION_UNSUPPORTED_CRITICAL: 'A',
+  CRIT_SHAPE_INVALID: 'A',
+  TX_NOT_FOUND: 'B',
+  PROVIDER_UNAVAILABLE: 'B',
+  TX_INTEGRITY_MISMATCH: 'B',
+  METADATA_NOT_FOUND: 'B',
+  INSUFFICIENT_CONFIRMATIONS: 'B',
+  SIGNATURE_INVALID: 'B',
+  SIGNER_KEY_UNRESOLVED: 'B',
+  WALLET_ADDRESS_MISMATCH: 'B',
+  URI_TARGET_FORBIDDEN: 'B',
+  URI_INTEGRITY_MISMATCH: 'B',
+  URI_PROVIDER_INTEGRITY_MISMATCH: 'B',
+  URI_FETCH_FAILED: 'B',
+  CONTENT_UNAVAILABLE: 'B',
+  CONTENT_FETCH_LIMIT_EXCEEDED: 'B',
+  CIPHERTEXT_UNAVAILABLE: 'B',
+  SERVICE_INDEPENDENCE_VIOLATION: 'B',
+  WRONG_DECRYPTION_INPUT_SHAPE: 'B',
+  WRONG_RECIPIENT_KEY: 'B',
+  TAMPERED_HEADER: 'B',
+  TAMPERED_CIPHERTEXT: 'B',
+  KDF_DERIVATION_FAILED: 'B',
+  ENC_PASSPHRASE_UNNORMALIZABLE: 'B',
+  ENC_PASSPHRASE_EMPTY: 'B',
+  SCHEMA_MERKLE_LEAF_COUNT_MISMATCH: 'B',
+  SCHEMA_MERKLE_LEAVES_FORMAT_UNSUPPORTED: 'B',
+  SCHEMA_MERKLE_LEAVES_MALFORMED: 'B',
+  MERKLE_ROOT_MISMATCH: 'B',
+  MERKLE_LEAVES_UNAVAILABLE: 'B',
+  MERKLE_UNSUPPORTED: 'B',
+  OUT_OF_PROFILE_SKIPPED: 'B',
+});
+
+// Layer-filtered views, in registry order. The structural validator emits only
+// Part A codes; the carriage (transport) step emits only the carriage code;
+// the verifier layer emits Part B codes (and re-runs the first two layers).
+export const STRUCTURAL_ERROR_CODES: ReadonlyArray<ErrorCode> = Object.freeze(
+  ERROR_CODES.filter((code) => ERROR_CODE_PART[code] === 'A'),
+);
+export const CARRIAGE_ERROR_CODES: ReadonlyArray<ErrorCode> = Object.freeze(
+  ERROR_CODES.filter((code) => ERROR_CODE_PART[code] === 'carriage'),
+);
+export const VERIFIER_ERROR_CODES: ReadonlyArray<ErrorCode> = Object.freeze(
+  ERROR_CODES.filter((code) => ERROR_CODE_PART[code] === 'B'),
+);
+
+export type StructuralErrorCode = ErrorCode;
+export type VerifierErrorCode = ErrorCode;
+
+// =============================================================================
+// Severity
+// =============================================================================
 //
-// `info` — a deliberate non-check (algorithm out of profile, unrecognised
-// signature algorithm at the opt-in informational tier).
-//
-// `warning` — a non-fatal anomaly that occurred at runtime but did not
-// invalidate the record (e.g. a transient gateway failure, partial leaves
-// availability).
-//
-// `MERKLE_UNSUPPORTED` / `OUT_OF_PROFILE_SKIPPED` carry dual severity
-// (`info` when another commitment was validated; `error` for the
-// merkle-only / strict-mode case). The verifier emits the resolved severity
-// per-issue; this map records the default `info` reading.
+// `error` fails the record; `warning` is a non-fatal runtime anomaly; `info`
+// is a deliberate non-failing disposition. Four codes carry DUAL severity —
+// the map records their DEFAULT reading, and a strict context promotes them
+// to `error`:
+//   - ENC_UNSUPPORTED            — info by default; error for the recipient
+//                                  role / strict sealed-crypto mode.
+//   - MERKLE_LEAVES_UNAVAILABLE  — warning beside a verified content
+//                                  commitment; error when its absence leaves
+//                                  the record with no verified commitment.
+//   - MERKLE_UNSUPPORTED         — info beside a validated items[] claim;
+//                                  error on a merkle-only record.
+//   - OUT_OF_PROFILE_SKIPPED     — info in render mode; error in strict
+//                                  end-to-end mode.
+// No layer may soften an `error` into a `warning` to make a record pass.
+
 export type Severity = 'error' | 'warning' | 'info';
 
 export const SEVERITY: Readonly<Record<ErrorCode, Severity>> = Object.freeze({
-  // --- Part A ---
   MALFORMED_CBOR: 'error',
   SCHEMA_TYPE_MISMATCH: 'error',
   SCHEMA_MISSING_REQUIRED: 'error',
@@ -141,17 +233,16 @@ export const SEVERITY: Readonly<Record<ErrorCode, Severity>> = Object.freeze({
   HASH_DIGEST_LENGTH_MISMATCH: 'error',
   UNSUPPORTED_HASH_ALG: 'error',
   UNSUPPORTED_MERKLE_COMMIT_ALG: 'error',
+  SCHEMA_MERKLE_LEAF_COUNT_INVALID: 'error',
   INVALID_URI: 'error',
   CHUNK_TOO_LARGE: 'error',
   UNAUTHENTICATED_CIPHER_FORBIDDEN: 'error',
   UNSUPPORTED_AEAD_ALG: 'error',
   NONCE_LENGTH_MISMATCH: 'error',
   UNSUPPORTED_ENVELOPE_SCHEME: 'error',
+  ENC_UNSUPPORTED: 'info',
   ENC_SLOTS_EMPTY: 'error',
   ENC_SLOT_INVALID_SHAPE: 'error',
-  ENC_SLOTS_DUPLICATE_KEM_MATERIAL: 'error',
-  ENC_SLOTS_TOO_MANY: 'error',
-  ENC_ENVELOPE_TOO_LARGE: 'error',
   UNSUPPORTED_KEM_ALG: 'error',
   ENC_KEM_REQUIRED: 'error',
   KEM_EPK_LENGTH_MISMATCH: 'error',
@@ -160,6 +251,9 @@ export const SEVERITY: Readonly<Record<ErrorCode, Severity>> = Object.freeze({
   ENC_SLOTS_MAC_INVALID_LENGTH: 'error',
   ENC_SLOTS_MAC_REQUIRED: 'error',
   ENC_SLOTS_REQUIRED: 'error',
+  ENC_SLOTS_DUPLICATE_KEM_MATERIAL: 'error',
+  ENC_SLOTS_TOO_MANY: 'error',
+  ENC_ENVELOPE_TOO_LARGE: 'error',
   ENC_EXCLUSIVITY_VIOLATION: 'error',
   ENC_NO_KEY_PATH: 'error',
   ENC_REQUIRES_CONTENT_HASH: 'error',
@@ -176,7 +270,9 @@ export const SEVERITY: Readonly<Record<ErrorCode, Severity>> = Object.freeze({
   SUPERSEDES_TX_INVALID_LENGTH: 'error',
   EXTENSION_UNSUPPORTED_CRITICAL: 'error',
   CRIT_SHAPE_INVALID: 'error',
-  // --- Part B ---
+  TX_NOT_FOUND: 'error',
+  PROVIDER_UNAVAILABLE: 'error',
+  TX_INTEGRITY_MISMATCH: 'error',
   METADATA_NOT_FOUND: 'error',
   INSUFFICIENT_CONFIRMATIONS: 'info',
   SIGNATURE_INVALID: 'error',
@@ -184,31 +280,48 @@ export const SEVERITY: Readonly<Record<ErrorCode, Severity>> = Object.freeze({
   WALLET_ADDRESS_MISMATCH: 'error',
   URI_TARGET_FORBIDDEN: 'error',
   URI_INTEGRITY_MISMATCH: 'error',
+  URI_PROVIDER_INTEGRITY_MISMATCH: 'warning',
   URI_FETCH_FAILED: 'warning',
   CONTENT_UNAVAILABLE: 'error',
+  CONTENT_FETCH_LIMIT_EXCEEDED: 'error',
   CIPHERTEXT_UNAVAILABLE: 'error',
-  PROVIDER_UNAVAILABLE: 'error',
   SERVICE_INDEPENDENCE_VIOLATION: 'error',
   WRONG_DECRYPTION_INPUT_SHAPE: 'error',
   WRONG_RECIPIENT_KEY: 'error',
   TAMPERED_HEADER: 'error',
   TAMPERED_CIPHERTEXT: 'error',
   KDF_DERIVATION_FAILED: 'error',
+  ENC_PASSPHRASE_UNNORMALIZABLE: 'error',
+  ENC_PASSPHRASE_EMPTY: 'error',
   SCHEMA_MERKLE_LEAF_COUNT_MISMATCH: 'error',
   SCHEMA_MERKLE_LEAVES_FORMAT_UNSUPPORTED: 'error',
   SCHEMA_MERKLE_LEAVES_MALFORMED: 'error',
   MERKLE_ROOT_MISMATCH: 'error',
   MERKLE_LEAVES_UNAVAILABLE: 'warning',
-  MERKLE_LEAVES_INFORMATIVE_FORM: 'info',
-  // Dual-severity — default reading is `info`; the verifier promotes to
-  // `error` for merkle-only records (no `items[]` content claim was
-  // validated in the same record).
   MERKLE_UNSUPPORTED: 'info',
-  // Dual-severity — default reading is `info` (render mode); strict
-  // end-to-end verifiers promote to `error`.
   OUT_OF_PROFILE_SKIPPED: 'info',
 });
 
+// Codes whose severity is context-dependent. `SEVERITY` records the default
+// reading; the promoting context escalates to `error`.
+export const DUAL_SEVERITY_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
+  'ENC_UNSUPPORTED',
+  'MERKLE_LEAVES_UNAVAILABLE',
+  'MERKLE_UNSUPPORTED',
+  'OUT_OF_PROFILE_SKIPPED',
+]);
+
 export function severityOf(code: ErrorCode): Severity {
   return SEVERITY[code];
+}
+
+// Position of a code in the canonical registry. Issues that carry an
+// identical path are ordered by this index, so every implementation sorts an
+// issue list identically.
+const REGISTRY_INDEX: ReadonlyMap<ErrorCode, number> = new Map(
+  ERROR_CODES.map((code, index) => [code, index]),
+);
+
+export function errorCodeRegistryIndex(code: ErrorCode): number {
+  return REGISTRY_INDEX.get(code) as number;
 }
