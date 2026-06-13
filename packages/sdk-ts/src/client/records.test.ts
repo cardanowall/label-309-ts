@@ -19,7 +19,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { Label309Client } from './label-309-client';
 import { RecordNotFoundError } from './record-not-found-error';
-import type { RecordResource } from './types';
+import type { PoeVerifyInput, RecordResource } from './types';
 import type { VerifyReport } from '../verifier/types';
 
 const TX_HASH = 'a'.repeat(64);
@@ -272,6 +272,24 @@ describe('RecordsNamespace.verify', () => {
     // decryption credentials.
     const body = JSON.parse(String((init as RequestInit).body));
     expect(body).toEqual({ fetch_content: false });
+  });
+
+  it('whitelist-builds the wire body — unknown caller-supplied fields never reach the gateway', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(verifyReportFixture()));
+    // An untyped call site (plain JS, or a TS caller casting through `any`)
+    // can smuggle arbitrary properties — including decryption credentials —
+    // into the input object. The client must drop everything except the
+    // known `fetch_content` field, asserted here on the raw body bytes.
+    const poisoned = {
+      fetch_content: false,
+      decryption: [{ recipientSecretKey: 'SECRET' }],
+      verify_uris: ['x'],
+    } as PoeVerifyInput;
+    await makeClient(fetchMock).records.verify(TX_HASH, poisoned);
+
+    const body = String((fetchMock.mock.calls[0]![1] as RequestInit).body);
+    expect(body).toBe('{"fetch_content":false}');
+    expect(body).not.toContain('SECRET');
   });
 
   it('sends an empty JSON body when no input is provided', async () => {

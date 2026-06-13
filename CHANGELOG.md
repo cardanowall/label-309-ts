@@ -9,6 +9,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 > release. Pre-1.0 versions do not carry the stability guarantees of
 > [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-06-13
+
+### Added
+
+- `crypto-core`: `streamSealedLength(plaintextLength)` returns the exact sealed-PoE STREAM ciphertext length — the plaintext length plus one 16-byte tag per 64 KiB chunk — without performing the seal, so a producer can size and quote an upload before the content-encryption key exists.
+
+### Security
+
+- `sdk-ts`: `records.verify()` builds the request body field by field and transmits only `fetch_content`. An untyped call site can no longer pass extra properties — including decryption credentials — through to the gateway.
+
+### Fixed
+
+- `poe-standard`: mixed-case CIDv1 URIs are rejected. The multibase body is decoded verbatim against the case its prefix advertises (`b`/`B` base32, `f`/`F` base16) instead of being case-folded, so a non-canonical CID no longer validates.
+
 ## [0.5.0] - 2026-06-12
 
 ### Breaking

@@ -1,6 +1,6 @@
 {
   "name": "@cardanowall/sdk-ts",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "description": "CardanoWall TypeScript SDK — standalone Label 309 verifier + envelope helpers + HTTP client (browser-safe).",
   "license": "Apache-2.0",

@@ -1483,16 +1483,22 @@ function readVarint(bytes: Uint8Array, start: number): { value: number; next: nu
 }
 
 // Multibase decoders for the closed set the CID profile admits.
+//
+// The body is decoded VERBATIM against the case the prefix advertises — never
+// case-folded. RFC 4648 base32/base16 each have a distinct lower- and
+// upper-case multibase prefix (`b`/`B`, `f`/`F`); a body whose case disagrees
+// with its prefix is not a canonical CID and is rejected, not silently folded
+// into the advertised case.
 function decodeMultibase(prefix: string, body: string): Uint8Array {
   switch (prefix) {
     case 'b':
-      return decodeBase32(body.toLowerCase(), 'rfc4648-lower');
+      return decodeBase32(body, 'rfc4648-lower');
     case 'B':
-      return decodeBase32(body.toUpperCase(), 'rfc4648-upper');
+      return decodeBase32(body, 'rfc4648-upper');
     case 'f':
-      return decodeBase16(body.toLowerCase());
+      return decodeBase16(body, 'lower');
     case 'F':
-      return decodeBase16(body.toUpperCase());
+      return decodeBase16(body, 'upper');
     case 'z':
       return decodeBase58btc(body);
     default:
@@ -1503,10 +1509,10 @@ function decodeMultibase(prefix: string, body: string): Uint8Array {
 const BASE16_LOWER = '0123456789abcdef';
 const BASE16_UPPER = '0123456789ABCDEF';
 
-function decodeBase16(s: string): Uint8Array {
+function decodeBase16(s: string, variant: 'lower' | 'upper'): Uint8Array {
   if (s.length % 2 !== 0) throw new Error('base16: odd-length');
+  const alphabet = variant === 'lower' ? BASE16_LOWER : BASE16_UPPER;
   const out = new Uint8Array(s.length / 2);
-  const alphabet = s === s.toLowerCase() ? BASE16_LOWER : BASE16_UPPER;
   for (let i = 0; i < out.length; i++) {
     const hi = alphabet.indexOf(s[i * 2]!);
     const lo = alphabet.indexOf(s[i * 2 + 1]!);

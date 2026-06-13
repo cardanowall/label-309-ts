@@ -131,12 +131,18 @@ export class RecordsNamespace {
    * affected claims report `not_checked`.
    */
   async verify(txHash: string, input?: PoeVerifyInput): Promise<VerifyReport> {
+    // Whitelist-build the wire body field by field — never serialize the
+    // caller's object verbatim — so unknown properties smuggled in by an
+    // untyped call site (including credential material) can never reach the
+    // gateway.
+    const body: { fetch_content?: boolean } = {};
+    if (input?.fetch_content !== undefined) body.fetch_content = input.fetch_content;
     const response = await this.config.fetch(
       `${this.config.baseUrl}/api/v1/records/${encodeURIComponent(txHash)}/verify`,
       {
         method: 'POST',
         headers: buildHeaders(this.config.apiKey),
-        body: JSON.stringify(input ?? {}),
+        body: JSON.stringify(body),
       },
     );
     await throwIfNotOk(response);

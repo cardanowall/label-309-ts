@@ -17,6 +17,7 @@ import {
   StreamTamperedError,
   streamOpen,
   streamSeal,
+  streamSealedLength,
   TAG_SIZE,
 } from './stream';
 
@@ -74,6 +75,21 @@ describe('stream64k — layout roundtrips across the chunk boundary', () => {
       expect(streamOpen({ payloadKey: KEY, ciphertext: sealed })).toEqual(plaintext);
     });
   }
+
+  it('streamSealedLength predicts the exact sealed length for every layout case', () => {
+    for (const c of cases) {
+      expect(streamSealedLength(c.length)).toBe(c.sealedLength);
+      // The prediction is the inverse of the real seal: assert against the
+      // actually-emitted ciphertext, not just the table value.
+      const sealed = streamSeal({ payloadKey: KEY, plaintext: patterned(c.length) });
+      expect(streamSealedLength(c.length)).toBe(sealed.length);
+    }
+  });
+
+  it('streamSealedLength rejects negative and non-integer lengths', () => {
+    expect(() => streamSealedLength(-1)).toThrowError(/non-negative integer/);
+    expect(() => streamSealedLength(1.5)).toThrowError(/non-negative integer/);
+  });
 
   it('chunks are nonce-domain-separated: two equal plaintext chunks seal to different bytes', () => {
     const plaintext = new Uint8Array(2 * CHUNK_SIZE); // both chunks all-zero

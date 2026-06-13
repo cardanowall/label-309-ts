@@ -89,6 +89,24 @@ class ChunkNonce {
   }
 }
 
+// Predict the sealed length of a STREAM payload from its plaintext length,
+// without sealing anything. The STREAM layout adds one 16-byte tag per chunk and
+// splits the plaintext into CHUNK_SIZE-byte chunks; an empty plaintext is still
+// exactly one (zero-length) final chunk, so the chunk count has a floor of 1.
+// This is the exact inverse of `streamSeal`'s output length
+// (`plaintext.length + chunkCount * TAG_SIZE`) and lets a producer quote the
+// uploaded ciphertext size before the random CEK exists. `plaintextLength` MUST
+// be a non-negative integer.
+export function streamSealedLength(plaintextLength: number): number {
+  if (!Number.isInteger(plaintextLength) || plaintextLength < 0) {
+    throw new Error(
+      `STREAM: plaintextLength MUST be a non-negative integer, got ${plaintextLength}`,
+    );
+  }
+  const chunkCount = Math.max(1, Math.ceil(plaintextLength / CHUNK_SIZE));
+  return plaintextLength + chunkCount * TAG_SIZE;
+}
+
 function assertPayloadKey(payloadKey: Uint8Array): void {
   if (payloadKey.length !== PAYLOAD_KEY_LENGTH) {
     throw new Error(
