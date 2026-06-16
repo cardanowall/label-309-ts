@@ -1,7 +1,7 @@
 // RFC 7807 `application/problem+json` envelope and the typed error class
 // hierarchy the SDK throws on every non-2xx response.
 //
-// Every Label 309 gateway `/api/v1/*` route emits the canonical shape:
+// Every Label 309 gateway route emits the canonical shape:
 //
 //   Content-Type: application/problem+json
 //   {
@@ -42,7 +42,7 @@ export interface ProblemErrorEntry {
 
 /**
  * RFC 7807 `application/problem+json` document as emitted by every Label 309
- * gateway `/api/v1/*` route.
+ * gateway route.
  *
  * Canonical fields (`type`, `title`, `status`, `detail`, `code`, `trace_id`)
  * are always present. `errors` is present on validation responses.

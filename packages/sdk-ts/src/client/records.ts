@@ -1,14 +1,15 @@
-// `client.records.*` wraps the open-standard indexer read surface:
+// `client.records.*` wraps the open-standard indexer read surface. The
+// configured `baseUrl` carries the gateway version segment, so these methods
+// append only the bare resource suffix:
 //
-//   GET  /api/v1/records                   → records.list(input?)
-//   GET  /api/v1/records/{tx_hash}         → records.get(txHash)
-//   POST /api/v1/records/{tx_hash}/verify  → records.verify(txHash, input)
+//   GET  /records                   → records.list(input?)
+//   GET  /records/count             → records.count(input)
+//   GET  /records/{tx_hash}         → records.get(txHash)
 //
 // The PoE namespace owns the mutation methods (uploads, publish,
 // publishBatch + the high-level publishContent/publishSealed/publishMerkle
-// helpers); reads and verifications live here under Records — same tag
-// grouping the OpenAPI registry uses (`tags: ['Records']` on these
-// operationIds).
+// helpers); reads live here under Records — same tag grouping the OpenAPI
+// registry uses (`tags: ['Records']` on these operationIds).
 //
 // Auth is optional: chain data is public. When an API key is configured the
 // SDK forwards it as `Authorization: Bearer …` so owner-only fields
@@ -18,12 +19,12 @@
 import { readJson, throwIfNotOk } from './http-helpers';
 import type {
   FetchImpl,
-  PoeVerifyInput,
   RecordResource,
+  RecordsCountInput,
+  RecordsCountResponse,
   RecordsListInput,
   RecordsListResponse,
 } from './types';
-import type { VerifyReport } from '../verifier/types';
 
 interface ResolvedConfig {
   readonly apiKey: string | undefined;
@@ -79,7 +80,7 @@ export class RecordsNamespace {
       params.set('cursor', input.cursor);
     }
     const query = params.toString();
-    const url = `${this.config.baseUrl}/api/v1/records${query === '' ? '' : `?${query}`}`;
+    const url = `${this.config.baseUrl}/records${query === '' ? '' : `?${query}`}`;
     const response = await this.config.fetch(url, {
       method: 'GET',
       headers: buildHeaders(this.config.apiKey),
@@ -96,6 +97,37 @@ export class RecordsNamespace {
   }
 
   /**
+   * Count the records matching a filter — the counting counterpart to
+   * `list()`. The paginated feed never carries a total, so a caller that needs
+   * the cardinality of a filter (a profile's proof count, an explorer facet)
+   * asks here.
+   *
+   * `signer` is REQUIRED: a count's cost is the size of the matching set, which
+   * only a signer scope bounds, so a signer-less count is rejected with 422
+   * (`ValidationFailedError`). The remaining filters (`scheme`, `sealed`, the
+   * block/time windows) narrow the count on top of the signer scope and share
+   * the exact query grammar `list()` uses. The count is over the public anchored
+   * set only.
+   */
+  async count(input: RecordsCountInput): Promise<RecordsCountResponse> {
+    const params = new URLSearchParams();
+    params.set('signer', input.signer);
+    if (input.scheme !== undefined) params.set('scheme', String(input.scheme));
+    if (input.sealed === true) params.set('sealed', 'true');
+    if (input.fromBlock !== undefined) params.set('from_block', String(input.fromBlock));
+    if (input.toBlock !== undefined) params.set('to_block', String(input.toBlock));
+    if (input.fromTime !== undefined) params.set('from_time', input.fromTime);
+    if (input.toTime !== undefined) params.set('to_time', input.toTime);
+    const url = `${this.config.baseUrl}/records/count?${params.toString()}`;
+    const response = await this.config.fetch(url, {
+      method: 'GET',
+      headers: buildHeaders(this.config.apiKey),
+    });
+    await throwIfNotOk(response);
+    return (await readJson(response)) as RecordsCountResponse;
+  }
+
+  /**
    * Fetch a record by Cardano transaction hash. Returns the JSON
    * `RecordResource` projection — same shape every `records.list` page entry
    * carries inside `data[]`.
@@ -106,7 +138,7 @@ export class RecordsNamespace {
    */
   async get(txHash: string): Promise<RecordResource> {
     const response = await this.config.fetch(
-      `${this.config.baseUrl}/api/v1/records/${encodeURIComponent(txHash)}`,
+      `${this.config.baseUrl}/records/${encodeURIComponent(txHash)}`,
       {
         method: 'GET',
         headers: buildHeaders(this.config.apiKey),
@@ -114,38 +146,5 @@ export class RecordsNamespace {
     );
     await throwIfNotOk(response);
     return (await readJson(response)) as RecordResource;
-  }
-
-  /**
-   * Run the canonical Label 309 verifier against the record at `txHash`.
-   * Returns the same `VerifyReport` shape the standalone verifier emits —
-   * `VerifyReport` IS the wire body of this endpoint, with no transformer in
-   * between.
-   *
-   * Auth required (Bearer with `poe:read` scope, or NextAuth session
-   * cookie). This is the hosted PUBLIC verifier: it accepts no decryption
-   * credentials, and sealed items report as unverifiable without decryption.
-   * To verify as a recipient (decrypt + plaintext-hash recheck), run the
-   * `verifier` module locally with its `decryption` input — keys never leave
-   * the process. Optional `fetch_content: false` skips content re-fetching;
-   * affected claims report `not_checked`.
-   */
-  async verify(txHash: string, input?: PoeVerifyInput): Promise<VerifyReport> {
-    // Whitelist-build the wire body field by field — never serialize the
-    // caller's object verbatim — so unknown properties smuggled in by an
-    // untyped call site (including credential material) can never reach the
-    // gateway.
-    const body: { fetch_content?: boolean } = {};
-    if (input?.fetch_content !== undefined) body.fetch_content = input.fetch_content;
-    const response = await this.config.fetch(
-      `${this.config.baseUrl}/api/v1/records/${encodeURIComponent(txHash)}/verify`,
-      {
-        method: 'POST',
-        headers: buildHeaders(this.config.apiKey),
-        body: JSON.stringify(body),
-      },
-    );
-    await throwIfNotOk(response);
-    return (await readJson(response)) as VerifyReport;
   }
 }

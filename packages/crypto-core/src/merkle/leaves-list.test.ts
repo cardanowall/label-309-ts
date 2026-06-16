@@ -37,34 +37,101 @@ function bytesToHex(bytes: Uint8Array): string {
 const enc = new TextEncoder();
 const leafD = (i: number): Uint8Array => sha256(enc.encode(`merkle-leaf-${i}`));
 
-// Pinned 275-byte canonical-CBOR leaves-list reference fixture.
-const PINNED_CBOR_HEX =
-  'a664726f6f74582093a86cdff4f26f1a7c9793cc7c3ce107102570a81a323902617f7c13670582ee' +
-  '66666f726d6174781c63617264616e6f2d706f652d6d65726b6c652d6c65617665732d7631666c65' +
-  '61766573845820b5e62a21038c1c2fdf28ad4d39ba6502e0568591c8647cac6998bfff67a25b3c58' +
-  '20986aad6d251d450b9e7cd0c811e65bc95f95688060d963a83ab6505da350be56582027f4c2b715' +
-  '7b2e28b1a08e47fce1c3fa27a0f2c8a6760f5995c8a83c9cd1cacc582049707d9c71d5ebf72aaa3a' +
-  'da7a34e152d41811b345366681fc09849e8c634076686c6561665f616c6768736861322d32353668' +
-  '747265655f616c676e726663393136322d7368613235366a6c6561665f636f756e7404';
+// Shared cross-SDK positive KAT corpus. Each vector pins the canonical-CBOR
+// leaves-list encoding both without and with the optional leaf_alg key, so the
+// TS / Python / Rust codecs encode and decode byte-identically.
+interface LeavesListKatVector {
+  readonly name: string;
+  readonly leaf_count: number;
+  readonly root: string;
+  readonly leaves: ReadonlyArray<string>;
+  readonly cbor_hex_no_leaf_alg: string;
+  readonly cbor_hex_with_leaf_alg: string;
+  readonly leaf_alg: string;
+}
+interface LeavesListKatCorpus {
+  readonly version: number;
+  readonly primitive: string;
+  readonly format: string;
+  readonly vectors: ReadonlyArray<LeavesListKatVector>;
+}
 
-const PINNED_ROOT_HEX = '93a86cdff4f26f1a7c9793cc7c3ce107102570a81a323902617f7c13670582ee';
+function loadMerkleFixture<T>(name: string): T {
+  return JSON.parse(
+    fs.readFileSync(
+      nodePath.resolve(
+        nodePath.dirname(fileURLToPath(import.meta.url)),
+        `../../tests/fixtures/merkle/${name}`,
+      ),
+      'utf8',
+    ),
+  ) as T;
+}
+
+const leavesListKatCorpus = loadMerkleFixture<LeavesListKatCorpus>('leaves-list-kat.json');
 
 describe('LEAVES_LIST_FORMAT_V1 constant', () => {
   it('exposes the wire literal', () => {
     expect(LEAVES_LIST_FORMAT_V1).toBe('cardano-poe-merkle-leaves-v1');
+    expect(leavesListKatCorpus.format).toBe(LEAVES_LIST_FORMAT_V1);
   });
 });
 
-describe('encodeLeavesList — byte-pin against reference fixture', () => {
-  it('emits the pinned 275-byte canonical CBOR for the 4-leaf fixture', () => {
-    const leaves = [leafD(0), leafD(1), leafD(2), leafD(3)];
-    const root = merkleSha2256Root(leaves);
-    expect(bytesToHex(root)).toBe(PINNED_ROOT_HEX);
-    const bytes = encodeLeavesList({ leaves, root, leafAlg: 'sha2-256' });
-    expect(bytes.length).toBe(275);
-    expect(bytesToHex(bytes)).toBe(PINNED_CBOR_HEX);
-  });
+describe('encodeLeavesList / decodeLeavesList — shared cross-SDK positive KAT corpus', () => {
+  for (const vector of leavesListKatCorpus.vectors) {
+    const leaves = vector.leaves.map((hex) => hexToBytes(hex));
 
+    it(`${vector.name}: recomputes the pinned root from the leaves`, () => {
+      expect(leaves.length).toBe(vector.leaf_count);
+      expect(bytesToHex(merkleSha2256Root(leaves))).toBe(vector.root);
+    });
+
+    it(`${vector.name}: encodes the pinned canonical CBOR (with leaf_alg)`, () => {
+      const bytes = encodeLeavesList({
+        leaves,
+        root: hexToBytes(vector.root),
+        leafAlg: vector.leaf_alg,
+      });
+      expect(bytesToHex(bytes)).toBe(vector.cbor_hex_with_leaf_alg);
+    });
+
+    it(`${vector.name}: encodes the pinned canonical CBOR (no leaf_alg)`, () => {
+      const bytes = encodeLeavesList({ leaves, root: hexToBytes(vector.root) });
+      expect(bytesToHex(bytes)).toBe(vector.cbor_hex_no_leaf_alg);
+    });
+
+    it(`${vector.name}: decodes the pinned CBOR back to the committed fields (with leaf_alg)`, () => {
+      const decoded = decodeLeavesList(hexToBytes(vector.cbor_hex_with_leaf_alg));
+      expect(decoded.format).toBe(LEAVES_LIST_FORMAT_V1);
+      expect(decoded.treeAlg).toBe('rfc9162-sha256');
+      expect(decoded.leafCount).toBe(vector.leaf_count);
+      expect(decoded.leafAlg).toBe(vector.leaf_alg);
+      expect(bytesToHex(decoded.root)).toBe(vector.root);
+      expect(decoded.leaves.map((l) => bytesToHex(l))).toEqual([...vector.leaves]);
+    });
+
+    it(`${vector.name}: decodes the pinned CBOR back to the committed fields (no leaf_alg)`, () => {
+      const decoded = decodeLeavesList(hexToBytes(vector.cbor_hex_no_leaf_alg));
+      expect(decoded.leafAlg).toBeUndefined();
+      expect(decoded.leafCount).toBe(vector.leaf_count);
+      expect(bytesToHex(decoded.root)).toBe(vector.root);
+      expect(decoded.leaves.map((l) => bytesToHex(l))).toEqual([...vector.leaves]);
+    });
+
+    it(`${vector.name}: encode(decode(cbor)) round-trips to the same bytes`, () => {
+      const decoded = decodeLeavesList(hexToBytes(vector.cbor_hex_with_leaf_alg));
+      expect(decoded.leafAlg).toBe(vector.leaf_alg);
+      const reencoded = encodeLeavesList({
+        leaves: decoded.leaves,
+        root: decoded.root,
+        leafAlg: vector.leaf_alg,
+      });
+      expect(bytesToHex(reencoded)).toBe(vector.cbor_hex_with_leaf_alg);
+    });
+  }
+});
+
+describe('encodeLeavesList — additional round-trip coverage', () => {
   it('emits canonical CBOR for a minimal (single-leaf) tree without leaf_alg', () => {
     const leaves = [leafD(0)];
     const root = merkleSha2256Root(leaves);
@@ -129,27 +196,6 @@ describe('encodeLeavesList — input validation', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       encodeLeavesList({ leaves, root, leafAlg: 123 as any }),
     ).toThrow(/leaf_alg/);
-  });
-});
-
-describe('decodeLeavesList — byte-pin parse of reference fixture', () => {
-  it('decodes the pinned 275-byte canonical CBOR', () => {
-    const decoded = decodeLeavesList(hexToBytes(PINNED_CBOR_HEX));
-    expect(decoded.format).toBe(LEAVES_LIST_FORMAT_V1);
-    expect(decoded.treeAlg).toBe('rfc9162-sha256');
-    expect(bytesToHex(decoded.root)).toBe(PINNED_ROOT_HEX);
-    expect(decoded.leafCount).toBe(4);
-    expect(decoded.leafAlg).toBe('sha2-256');
-    expect(decoded.leaves.length).toBe(4);
-    const expectedLeaves = [
-      'b5e62a21038c1c2fdf28ad4d39ba6502e0568591c8647cac6998bfff67a25b3c',
-      '986aad6d251d450b9e7cd0c811e65bc95f95688060d963a83ab6505da350be56',
-      '27f4c2b7157b2e28b1a08e47fce1c3fa27a0f2c8a6760f5995c8a83c9cd1cacc',
-      '49707d9c71d5ebf72aaa3ada7a34e152d41811b345366681fc09849e8c634076',
-    ];
-    for (let i = 0; i < 4; i++) {
-      expect(bytesToHex(decoded.leaves[i] as Uint8Array)).toBe(expectedLeaves[i]);
-    }
   });
 });
 

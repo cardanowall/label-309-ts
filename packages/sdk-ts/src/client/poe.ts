@@ -1,9 +1,11 @@
-// Low-level wrappers over the public mutating /api/v1/poe/* surface:
+// Low-level wrappers over the public mutating `/poe/*` surface. The configured
+// `baseUrl` carries the gateway version segment, so these methods append only
+// the bare resource suffix:
 //
-//   POST /api/v1/poe/quote           — lock a USD price for a publish
-//   POST /api/v1/poe/uploads         — multipart binary upload to a backend
-//   POST /api/v1/poe/publish         — single finalised record (JSON)
-//   POST /api/v1/poe/publish-batch   — 1..50 finalised records (JSON)
+//   POST /poe/quote           — lock a USD price for a publish
+//   POST /poe/uploads         — multipart binary upload to a backend
+//   POST /poe/publish         — single finalised record (JSON)
+//   POST /poe/publish-batch   — 1..50 finalised records (JSON)
 //
 // Plus high-level helpers that compose the above into common flows:
 //
@@ -22,7 +24,11 @@ import {
   publishSealed as publishSealedImpl,
   type ResolvedPublishConfig,
 } from './publish';
-import { uploadResumable as uploadResumableImpl, type SingleShotUpload } from './resumable-upload';
+import {
+  abandonUploadSession as abandonUploadSessionImpl,
+  uploadResumable as uploadResumableImpl,
+  type SingleShotUpload,
+} from './resumable-upload';
 import type {
   FetchImpl,
   PublishBatchInput,
@@ -102,7 +108,7 @@ export class PoeNamespace {
       recipient_count: input.recipientCount,
       file_bytes_total: input.fileBytesTotal,
     };
-    const response = await this.config.fetch(`${this.config.baseUrl}/api/v1/poe/quote`, {
+    const response = await this.config.fetch(`${this.config.baseUrl}/poe/quote`, {
       method: 'POST',
       headers: buildJsonHeaders({ apiKey: this.config.apiKey }),
       body: JSON.stringify(body),
@@ -118,7 +124,7 @@ export class PoeNamespace {
    * indices.
    *
    * Billing: free. The storage cost is part of the publish quote (POST
-   * /api/v1/poe/quote → POST /api/v1/poe/publish) and is debited once at
+   * /poe/quote → POST /poe/publish) and is debited once at
    * publish time against the locked price snapshot.
    *
    * On HTTP-level failure (auth, rate limit, malformed request) this throws
@@ -146,7 +152,7 @@ export class PoeNamespace {
       apiKey: this.config.apiKey,
       idempotencyKey: input.idempotencyKey,
     });
-    const response = await this.config.fetch(`${this.config.baseUrl}/api/v1/poe/uploads`, {
+    const response = await this.config.fetch(`${this.config.baseUrl}/poe/uploads`, {
       method: 'POST',
       headers,
       body: form,
@@ -181,6 +187,17 @@ export class PoeNamespace {
   }
 
   /**
+   * Abandon a resumable upload session (`DELETE /poe/uploads/sessions/{sid}`),
+   * discarding the session and any not-yet-adopted staged bytes server-side.
+   * Use it to discard an upload the user cancelled before completion. Idempotent
+   * — a session that was never created, already abandoned, or expired resolves
+   * successfully (the gateway's 404/410 is treated as already-gone).
+   */
+  async abandonUploadSession(sessionId: string, signal?: AbortSignal): Promise<void> {
+    return abandonUploadSessionImpl(this.config, sessionId, signal);
+  }
+
+  /**
    * Upload exactly one blob via the single-shot multipart route and resolve its
    * `ar://` URI. Backs the small-file branch of `uploadResumable`; it shares the
    * `uploads()` wire shape but takes one blob and an optional abort signal, and
@@ -200,7 +217,7 @@ export class PoeNamespace {
       new Blob([bytes as unknown as ArrayBuffer], { type: 'application/octet-stream' }),
       'file_0.bin',
     );
-    const response = await this.config.fetch(`${this.config.baseUrl}/api/v1/poe/uploads`, {
+    const response = await this.config.fetch(`${this.config.baseUrl}/poe/uploads`, {
       method: 'POST',
       headers: buildMultipartHeaders({ apiKey: this.config.apiKey, idempotencyKey }),
       body: form,
@@ -232,7 +249,7 @@ export class PoeNamespace {
       quote_id: input.quoteId,
     };
     if (input.signatures !== undefined) body.signatures = input.signatures;
-    const response = await this.config.fetch(`${this.config.baseUrl}/api/v1/poe/publish`, {
+    const response = await this.config.fetch(`${this.config.baseUrl}/poe/publish`, {
       method: 'POST',
       headers: buildJsonHeaders({
         apiKey: this.config.apiKey,
@@ -260,7 +277,7 @@ export class PoeNamespace {
         ...(r.signatures !== undefined ? { signatures: r.signatures } : {}),
       })),
     };
-    const response = await this.config.fetch(`${this.config.baseUrl}/api/v1/poe/publish-batch`, {
+    const response = await this.config.fetch(`${this.config.baseUrl}/poe/publish-batch`, {
       method: 'POST',
       headers: buildJsonHeaders({
         apiKey: this.config.apiKey,

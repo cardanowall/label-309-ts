@@ -1,6 +1,8 @@
-// `client.account.*` wraps the account read surface:
+// `client.account.*` wraps the account read surface. The configured `baseUrl`
+// carries the gateway version segment, so this method appends only the bare
+// resource suffix:
 //
-//   GET /api/v1/account/balance → account.balance()
+//   GET /account/balance → account.balance()
 //
 // Auth is required (Bearer with `account:read` scope, or a session cookie when
 // the gateway is browser-fronted). The configured API key is forwarded as
@@ -53,7 +55,7 @@ export class AccountNamespace {
    * scope.
    */
   async balance(): Promise<AccountBalance> {
-    const response = await this.config.fetch(`${this.config.baseUrl}/api/v1/account/balance`, {
+    const response = await this.config.fetch(`${this.config.baseUrl}/account/balance`, {
       method: 'GET',
       headers: buildHeaders(this.config.apiKey),
     });

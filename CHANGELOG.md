@@ -9,6 +9,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 > release. Pre-1.0 versions do not carry the stability guarantees of
 > [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-06-16
+
+### Added
+
+- `sdk-ts`: a new `@cardanowall/sdk-ts/certificate` namespace (also re-exported as `certificate` from the package root) for Label 309 **inclusion certificates** — a self-contained, standalone-verifiable proof that one or more content hashes were committed as leaves of an RFC 9162 SHA-256 Merkle tree whose root was published on Cardano under metadata label 309. `buildInclusionCertificate` computes and self-verifies per-target proofs and emits the JSON certificate; `verifyInclusionCertificate` re-verifies a certificate purely from its own bytes; `encodeCoseInclusionProof` / `encodeIetfInclusionProof` emit the COSE / RFC 9162-aligned CBOR proof and the bare IETF inclusion-proof byte string. The CBOR proof is byte-identical across the TypeScript, Python, and Rust SDKs.
+- `crypto-core`: streaming sealed-PoE construction — `sealStream` encrypts content as a segmented `chacha20-poly1305-stream64k` ciphertext while reporting progress, and `unwrapStream` performs the matching streaming open, so large payloads no longer need to be held in memory whole.
+
+### Breaking
+
+- `sdk-ts`: `Label309Client` no longer hardcodes the `/api/v1` path segment. The configured `baseUrl` now carries the full versioned API root (e.g. `https://gateway.example.com/api/v1`) and the client appends only bare resource suffixes. Update your client configuration to include the version segment.
+- `sdk-ts`: `records.verify()` has been removed. A Label 309 verdict must never require trusting a gateway, so the hosted server-side verify call is gone; run this SDK's standalone verifier — it fetches the transaction metadata from a public explorer and verifies locally — instead.
+
+### Changed
+
+- `poe-standard`: version alignment with the coordinated 0.7.0 release; no functional changes.
+
 ## [0.6.0] - 2026-06-13
 
 ### Added

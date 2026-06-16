@@ -9,6 +9,7 @@ export default defineConfig({
     'ids/index': 'src/ids/index.ts',
     'merkle/index': 'src/merkle/index.ts',
     'hash/index': 'src/hash/index.ts',
+    'certificate/index': 'src/certificate/index.ts',
     'identity/index': 'src/identity/index.ts',
     'conformance/cli': 'src/conformance/cli.ts',
   },

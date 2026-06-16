@@ -36,9 +36,15 @@ import { AeadVerificationError } from '../aead/errors';
 export const CHUNK_SIZE = 65536;
 export const TAG_SIZE = 16;
 
+// Sealed length of one STREAM chunk: a full CHUNK_SIZE-byte plaintext chunk plus
+// its 16-byte Poly1305 tag. Exposed (rather than open-coded as `65552`) so the
+// high-level streaming wrappers re-chunk the ciphertext against the format
+// constant, not a magic number — a single source of truth shared by every
+// consumer that walks the sealed stream in fixed-size steps.
+export const SEALED_CHUNK_SIZE = CHUNK_SIZE + TAG_SIZE;
+
 const NONCE_LENGTH = 12;
 const COUNTER_LENGTH = 11;
-const SEALED_CHUNK_SIZE = CHUNK_SIZE + TAG_SIZE;
 const PAYLOAD_KEY_LENGTH = 32;
 const EMPTY_AAD: Uint8Array = new Uint8Array(0);
 

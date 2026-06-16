@@ -59,7 +59,7 @@ function problemBody(overrides: Record<string, unknown>): Record<string, unknown
 
 function makeClient(fetchMock: ReturnType<typeof vi.fn>): Label309Client {
   return new Label309Client({
-    baseUrl: 'https://cardanowall.com',
+    baseUrl: 'https://cardanowall.com/api/v1',
     apiKey: 'opaque-bearer-token',
     fetch: fetchMock as unknown as typeof globalThis.fetch,
   });
@@ -126,6 +126,47 @@ describe('PoeNamespace.quote', () => {
       recipient_count: 1,
       file_bytes_total: 1_048_576,
     });
+  });
+
+  it('parses the optional pricing breakdown when a gateway attaches it', async () => {
+    // A gateway MAY surface a per-component cost split (the CardanoWall
+    // dashboard reads it). The additive fields parse onto QuoteResponse; the
+    // core opaque fields are unaffected.
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(
+        {
+          ...QUOTE_SUCCESS_BODY,
+          usd_micros: '180000',
+          breakdown: {
+            network_usd_micros: '20000',
+            storage_usd_micros: '130000',
+            service_usd_micros: '30000',
+          },
+          margin_pct: 0.15,
+          margin_source: 'account-override',
+          fx_age_seconds: 42,
+        },
+        200,
+      ),
+    );
+    const out = await makeClient(fetchMock).poe.quote({
+      recordBytes: 256,
+      recipientCount: 1,
+      fileBytesTotal: 1_048_576,
+    });
+    // The opaque fields still resolve...
+    expect(out.quote_id).toBe(QUOTE_ID);
+    expect(out.amount).toBe('180000');
+    // ...and the additive breakdown is surfaced verbatim.
+    expect(out.usd_micros).toBe('180000');
+    expect(out.breakdown).toEqual({
+      network_usd_micros: '20000',
+      storage_usd_micros: '130000',
+      service_usd_micros: '30000',
+    });
+    expect(out.margin_pct).toBe(0.15);
+    expect(out.margin_source).toBe('account-override');
+    expect(out.fx_age_seconds).toBe(42);
   });
 
   it('maps a 503 pricing outage to ServiceUnavailableError', async () => {
@@ -616,7 +657,7 @@ describe('PoeNamespace request-shape parity fixture', () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(PUBLISH_SUCCESS_BODY, 202));
     const client = new Label309Client({
       apiKey: `sk-cw-live-${'b'.repeat(52)}`,
-      baseUrl: 'http://test.example',
+      baseUrl: 'http://test.example/api/v1',
       fetch: fetchMock as unknown as typeof globalThis.fetch,
     });
     // 16 bytes of canonical-CBOR-shaped placeholder — the fixture only pins

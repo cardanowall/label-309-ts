@@ -20,6 +20,28 @@ const LEAF_PREFIX = 0x00;
 const NODE_PREFIX = 0x01;
 const DIGEST_LENGTH = 32;
 
+// The verify fold tracks the leaf index and subtree size with `>>> 1` (an
+// unsigned 32-bit shift). That arithmetic is only exact while both values stay
+// within 32 bits, so the algorithm's safe domain is `1 <= treeSize <= 2^32 - 1`
+// (and `0 <= index < treeSize`). A `treeSize` at or above 2^32 silently
+// truncates inside the fold, which would let a forged proof verify against the
+// wrong subtree shape. We therefore reject the whole out-of-range domain up
+// front rather than fold it. The on-chain commitment caps `leaf_count` at the
+// same `2^32 - 1`, so no legitimate tree is excluded.
+const MAX_TREE_SIZE = 0xffffffff;
+
+// Reject an out-of-range (index, treeSize) pair as a structural error. The
+// parity twins in the Python and Rust SDKs must mirror this guard so a forged
+// oversized `tree_size` is refused identically across all implementations.
+function validateTreeRange(index: number, treeSize: number, fnName: string): void {
+  if (!Number.isSafeInteger(treeSize) || treeSize < 1 || treeSize > MAX_TREE_SIZE) {
+    throw new RangeError(`${fnName}: treeSize ${treeSize} out of range [1, ${MAX_TREE_SIZE}]`);
+  }
+  if (!Number.isSafeInteger(index) || index < 0 || index >= treeSize) {
+    throw new RangeError(`${fnName}: index ${index} out of range [0, ${treeSize})`);
+  }
+}
+
 function validateLeaves(leaves: ReadonlyArray<Uint8Array>, fnName: string): void {
   if (leaves.length === 0) {
     throw new Error(`${fnName}: empty leaf list (n == 0 is forbidden by RFC 9162 §2.1.1)`);
@@ -46,11 +68,7 @@ export function merkleSha2256InclusionProof(
   index: number,
 ): Uint8Array[] {
   validateLeaves(leaves, 'merkleSha2256InclusionProof');
-  if (!Number.isInteger(index) || index < 0 || index >= leaves.length) {
-    throw new Error(
-      `merkleSha2256InclusionProof: index ${index} out of range [0, ${leaves.length})`,
-    );
-  }
+  validateTreeRange(index, leaves.length, 'merkleSha2256InclusionProof');
   return auditPath(leaves, index, 0, leaves.length);
 }
 
@@ -73,17 +91,13 @@ export function merkleSha2256VerifyInclusion(
   proof: ReadonlyArray<Uint8Array>,
   root: Uint8Array,
 ): boolean {
+  // Out-of-range (index, treeSize) is a structural error, not a "does not
+  // verify" verdict: the fold's 32-bit shift arithmetic is undefined outside
+  // the safe domain, so we refuse it rather than return a (potentially forged)
+  // boolean. Byte-shape problems below are genuine non-verification (false).
+  validateTreeRange(index, treeSize, 'merkleSha2256VerifyInclusion');
   if (!(leaf instanceof Uint8Array) || leaf.length !== DIGEST_LENGTH) return false;
   if (!(root instanceof Uint8Array) || root.length !== DIGEST_LENGTH) return false;
-  if (
-    !Number.isInteger(index) ||
-    !Number.isInteger(treeSize) ||
-    treeSize < 1 ||
-    index < 0 ||
-    index >= treeSize
-  ) {
-    return false;
-  }
   for (let i = 0; i < proof.length; i++) {
     const sibling = proof[i];
     if (!(sibling instanceof Uint8Array) || sibling.length !== DIGEST_LENGTH) {

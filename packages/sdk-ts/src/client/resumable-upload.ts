@@ -113,7 +113,7 @@ function octetHeaders(config: ResolvedConfig, length: number, digestBase64: stri
   return headers;
 }
 
-const SESSIONS_PATH = '/api/v1/poe/uploads/sessions';
+const SESSIONS_PATH = '/poe/uploads/sessions';
 
 function chunkRange(index: number, chunkBytes: number, totalBytes: number): [number, number] {
   const start = index * chunkBytes;
@@ -185,6 +185,31 @@ async function getSessionStatus(
   return (await readJson(response)) as UploadSessionStatus;
 }
 
+/**
+ * Abandon an upload session: `DELETE /poe/uploads/sessions/{sid}`. The gateway
+ * deletes the session row (and any not-yet-adopted staged bytes) and replies
+ * `204`. Idempotent: a `404`/`410` (the session was never created, already
+ * abandoned, or expired) is treated as success, since the caller's goal — the
+ * session no longer exists — already holds. Any other non-2xx throws the typed
+ * HTTP error so a real failure (e.g. a `403`) is not swallowed.
+ */
+async function abandonSession(
+  config: ResolvedConfig,
+  sessionId: string,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const response = await config.fetch(
+    `${config.baseUrl}${SESSIONS_PATH}/${encodeURIComponent(sessionId)}`,
+    {
+      method: 'DELETE',
+      headers: jsonHeaders(config),
+      ...(signal ? { signal } : {}),
+    },
+  );
+  if (response.ok || response.status === 404 || response.status === 410) return;
+  await throwIfNotOk(response);
+}
+
 async function putChunk(
   config: ResolvedConfig,
   sessionId: string,
@@ -233,7 +258,7 @@ async function pollAttempt(
 ): Promise<UploadAttemptCommitted | UploadAttemptReleased> {
   for (let attempt = 0; attempt < ATTEMPT_POLL_MAX_ATTEMPTS; attempt++) {
     const response = await config.fetch(
-      `${config.baseUrl}/api/v1/poe/uploads/attempts/${encodeURIComponent(attemptId)}`,
+      `${config.baseUrl}/poe/uploads/attempts/${encodeURIComponent(attemptId)}`,
       {
         method: 'GET',
         headers: jsonHeaders(config),
@@ -292,7 +317,13 @@ export class ResumableUploadError extends Error {
   }
 }
 
-/** Upload `missing` chunk indices with bounded parallelism, retrying each on failure. */
+/**
+ * Upload `missing` chunk indices with bounded parallelism, retrying each on
+ * failure. `onChunkDone` is invoked once per chunk, AFTER the gateway durably
+ * accepts it, with the chunk's index and byte length — chunks complete out of
+ * order under parallelism, so the caller accumulates `bytesSent` from the
+ * reported lengths rather than assuming sequential progress.
+ */
 async function uploadChunks(
   config: ResolvedConfig,
   sessionId: string,
@@ -303,6 +334,7 @@ async function uploadChunks(
   parallelism: number,
   maxRetries: number,
   signal: AbortSignal | undefined,
+  onChunkDone: (index: number, byteLength: number) => void,
 ): Promise<void> {
   let cursor = 0;
   const workers: Promise<void>[] = [];
@@ -318,6 +350,7 @@ async function uploadChunks(
           const [start, end] = chunkRange(index, chunkBytes, totalBytes);
           const bytes = await source.slice(start, end);
           await putChunkWithRetry(config, sessionId, index, bytes, maxRetries, signal);
+          onChunkDone(index, bytes.byteLength);
         }
       })(),
     );
@@ -365,6 +398,21 @@ async function putChunkWithRetry(
 }
 
 /**
+ * Public entry point for abandoning a resumable upload session (the
+ * `DELETE /poe/uploads/sessions/{sid}` primitive). Discards the session and any
+ * not-yet-adopted staged bytes server-side. Idempotent: a session that was never
+ * created, already abandoned, or expired (404/410) resolves successfully. Backs
+ * `PoeNamespace.abandonUploadSession`.
+ */
+export async function abandonUploadSession(
+  config: ResolvedConfig,
+  sessionId: string,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  return abandonSession(config, sessionId, signal);
+}
+
+/**
  * Drive a single-file upload, choosing single-shot vs the chunked session flow
  * by size. See {@link UploadResumableInput} for the options.
  */
@@ -387,6 +435,14 @@ export async function uploadResumable(
       bytes,
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
+    });
+    // The single-shot path has no chunk grid: report a single terminal 100%
+    // progress so a caller's progress handler still sees completion.
+    input.onProgress?.({
+      bytesSent: result.bytes,
+      totalBytes: result.bytes,
+      chunkIndex: 0,
+      chunksTotal: 1,
     });
     return {
       uri: result.uri,
@@ -411,6 +467,9 @@ async function runSession(
 
   let sessionId: string;
   let chunkBytes: number;
+  // Total chunks in the grid, for progress reporting. Authoritative from the
+  // create response (fresh) or the server status (resume).
+  let chunksTotal: number;
   let missing: ReadonlyArray<number>;
   // The declared whole-file SHA-256 (hex) the session is content-addressed by.
   // On a fresh create it is computed once over the local source; on resume it is
@@ -449,6 +508,7 @@ async function runSession(
     sessionId = status.session_id;
     declaredSha256 = status.sha256;
     chunkBytes = status.chunk_bytes;
+    chunksTotal = status.chunk_count;
     // The server's declared total is authoritative for the chunk grid, not the
     // live local source size. The original create fixed `total_bytes`, the whole-
     // file digest, and the index<->offset mapping together; bounding the final
@@ -490,27 +550,84 @@ async function runSession(
     sessionId = created.session_id;
     // Honour the server's authoritative chunk size (it may clamp to its ceiling).
     chunkBytes = created.chunk_bytes;
+    chunksTotal = created.chunk_count;
     gridTotalBytes = totalBytes;
     // A fresh create has no `missing` field and an empty `received`, so every
     // index is outstanding.
     missing = missingIndices(created.received, created.chunk_count);
   }
 
-  if (missing.length > 0) {
-    await uploadChunks(
-      config,
-      sessionId,
-      source,
-      chunkBytes,
-      gridTotalBytes,
-      missing,
-      input.parallelism ?? DEFAULT_PARALLELISM,
-      input.maxChunkRetries ?? DEFAULT_MAX_CHUNK_RETRIES,
-      signal,
+  // Cumulative progress for this invocation. Chunks complete out of order under
+  // parallelism, so `bytesSent` accumulates the reported chunk lengths; the
+  // index reported is the chunk that just landed. The reporter is shared across
+  // the initial upload and any 409-resend in finishSession, so a single
+  // monotonically-growing byte count spans both.
+  let bytesSent = 0;
+  const reportChunk = (index: number, byteLength: number): void => {
+    bytesSent += byteLength;
+    input.onProgress?.({ bytesSent, totalBytes: gridTotalBytes, chunkIndex: index, chunksTotal });
+  };
+
+  // Once the session exists, any failure — an abort, a chunk error, OR a
+  // throwing caller callback (`onSessionCreated` / `onProgress`) — must not
+  // leave a dangling half-uploaded session on the gateway: abandon it
+  // best-effort. The `onSessionCreated` notification is therefore made INSIDE
+  // this scope (it fires the instant the session exists, before any chunk PUT,
+  // so the caller can persist the id and resume after a crash), so that a
+  // callback that throws is funnelled through the same cleanup as the upload
+  // work. A failed abandon is surfaced WITH the session id so the caller can
+  // retry the abandon or resume.
+  try {
+    // Surface the session id the instant it exists — before any chunk PUT — so
+    // the caller can persist it and resume after a crash that happens before
+    // this helper returns. Skipped on resume: the caller already holds the id.
+    if (input.sessionId === undefined) input.onSessionCreated?.(sessionId);
+
+    if (missing.length > 0) {
+      await uploadChunks(
+        config,
+        sessionId,
+        source,
+        chunkBytes,
+        gridTotalBytes,
+        missing,
+        input.parallelism ?? DEFAULT_PARALLELISM,
+        input.maxChunkRetries ?? DEFAULT_MAX_CHUNK_RETRIES,
+        signal,
+        reportChunk,
+      );
+    }
+
+    return await finishSession(config, sessionId, declaredSha256, input, reportChunk);
+  } catch (err) {
+    // A clean abandon falls through to rethrow the ORIGINAL failure unchanged; a
+    // FAILED abandon throws SESSION_FAILED (naming the session id) from within
+    // the helper, so it never reaches this rethrow.
+    await abandonAfterFailure(config, sessionId);
+    throw err;
+  }
+}
+
+/**
+ * Best-effort abandon of a session whose upload failed (an abort, a chunk
+ * error, or a throwing caller callback). On success it returns so the caller
+ * rethrows the original failure unchanged. If the abandon ITSELF fails, it
+ * throws a SESSION_FAILED error naming the session id so the caller can retry
+ * the abandon or resume — otherwise the session would leak silently. The abandon
+ * runs WITHOUT the caller's signal (which may already be aborted), so the DELETE
+ * is actually sent.
+ */
+async function abandonAfterFailure(config: ResolvedConfig, sessionId: string): Promise<void> {
+  try {
+    await abandonSession(config, sessionId, undefined);
+  } catch (abandonErr) {
+    throw new ResumableUploadError(
+      'SESSION_FAILED',
+      `upload failed and session ${sessionId} could not be abandoned (retry abandon or resume): ${
+        abandonErr instanceof Error ? abandonErr.message : String(abandonErr)
+      }`,
     );
   }
-
-  return finishSession(config, sessionId, declaredSha256, input);
 }
 
 // Drive /complete to a terminal result. On a 409 incomplete-upload, the server's
@@ -522,6 +639,7 @@ async function finishSession(
   sessionId: string,
   declaredSha256: string,
   input: UploadResumableInput,
+  reportChunk: (index: number, byteLength: number) => void,
 ): Promise<UploadResumableResult> {
   const signal = input.signal;
   // The completion key is the caller's promise of sameness; default it to the
@@ -564,6 +682,7 @@ async function finishSession(
           input.parallelism ?? DEFAULT_PARALLELISM,
           input.maxChunkRetries ?? DEFAULT_MAX_CHUNK_RETRIES,
           signal,
+          reportChunk,
         );
         continue;
       }

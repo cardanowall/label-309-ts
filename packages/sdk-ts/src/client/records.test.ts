@@ -1,15 +1,13 @@
 // Unit tests for client.records.* — the records read namespace that wraps
-// `GET /api/v1/records`, `GET /api/v1/records/{tx_hash}`, and
-// `POST /api/v1/records/{tx_hash}/verify`.
+// `GET /records` and `GET /records/{tx_hash}` (the bare suffixes the client
+// appends to the version-carrying base URL).
 //
 // Test shape mirrors the server fixture: we assert on the actual HTTP request
 // shape (URL, method, headers, body) AND on the response being parsed into
-// the typed `RecordResource` / `VerifyReport`. The previous incarnation of
-// these tests (under `client.poe.get/verify`) was mock-asserts-input — it
-// would have continued to pass even when the methods hit a non-existent
-// URL. The fixtures below come from the real server response shapes
-// (the server's RecordResource schema; VerifyReport in
-// `src/verifier/types.ts`).
+// the typed `RecordResource`. The previous incarnation of these tests (under
+// `client.poe.get`) was mock-asserts-input — it would have continued to pass
+// even when the methods hit a non-existent URL. The fixtures below come from
+// the real server response shapes (the server's RecordResource schema).
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,8 +17,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { Label309Client } from './label-309-client';
 import { RecordNotFoundError } from './record-not-found-error';
-import type { PoeVerifyInput, RecordResource } from './types';
-import type { VerifyReport } from '../verifier/types';
+import type { RecordResource } from './types';
 
 const TX_HASH = 'a'.repeat(64);
 const ACCOUNT_ID = 'acct_06bqrjg0csvqfanaqexvqexvqc';
@@ -42,7 +39,7 @@ function problemResponse(body: Record<string, unknown>, status: number): Respons
 function makeClient(fetchMock: ReturnType<typeof vi.fn>): Label309Client {
   return new Label309Client({
     apiKey: `sk-cw-live-${'a'.repeat(52)}`,
-    baseUrl: 'http://test.example',
+    baseUrl: 'http://test.example/api/v1',
     fetch: fetchMock as unknown as typeof globalThis.fetch,
   });
 }
@@ -65,28 +62,8 @@ function recordFixture(overrides: Partial<RecordResource> = {}): RecordResource 
   };
 }
 
-// Realistic VerifyReport fixture — mirrors the shape `verifyReportToDict`
-// emits and the server returns verbatim.
-function verifyReportFixture(overrides: Partial<VerifyReport> = {}): VerifyReport {
-  return {
-    txHash: TX_HASH,
-    network: 'cardano:mainnet',
-    verdict: 'valid',
-    exitCode: 0,
-    profile: 'core',
-    confirmationDepth: 100,
-    confirmationThreshold: 12,
-    block_time: 1767225600,
-    issues: [],
-    items: [{ contentCheck: 'not_checked' }],
-    merkle: [],
-    auditTrail: [],
-    ...overrides,
-  };
-}
-
 describe('RecordsNamespace.list', () => {
-  it('GETs /api/v1/records?sealed=true&... and returns RecordResource page entries', async () => {
+  it('GETs /records?sealed=true&... and returns RecordResource page entries', async () => {
     const page = {
       object: 'list',
       data: [recordFixture(), recordFixture({ tx_hash: 'b'.repeat(64) })],
@@ -119,7 +96,7 @@ describe('RecordsNamespace.list', () => {
     expect(callUrl).toContain('sealed=true');
     expect(callUrl).toContain('limit=25');
     expect(callUrl).toContain('cursor=eyJjdXIiOjF9');
-    expect(String(callUrl)).not.toContain('/api/v1/poe/');
+    expect(String(callUrl)).not.toContain('/poe/');
   });
 
   it('omits the sealed filter and query string entirely when no input is given', async () => {
@@ -177,8 +154,79 @@ describe('RecordsNamespace.list', () => {
   });
 });
 
+describe('RecordsNamespace.count', () => {
+  const SIGNER = 'a'.repeat(64);
+
+  it('GETs /records/count with the signer (required) and the narrowing filters', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ object: 'count', count: 42, url: '/api/v1/records/count' }),
+      );
+    const out = await makeClient(fetchMock).records.count({
+      signer: SIGNER,
+      scheme: 1,
+      sealed: true,
+      fromBlock: 100,
+      toBlock: 200,
+      fromTime: '2026-01-01T00:00:00.000Z',
+      toTime: '2026-02-01T00:00:00.000Z',
+    });
+
+    // Response is the typed count resource, asserted on the data.
+    expect(out.object).toBe('count');
+    expect(out.count).toBe(42);
+    expect(out.url).toBe('/api/v1/records/count');
+
+    const callUrl = String(fetchMock.mock.calls[0]![0]);
+    expect(callUrl).toContain('http://test.example/api/v1/records/count?');
+    // The signer is always present (the gateway 422s without it) and every
+    // filter maps to the same snake_case query name the list route uses.
+    expect(callUrl).toContain(`signer=${SIGNER}`);
+    expect(callUrl).toContain('scheme=1');
+    expect(callUrl).toContain('sealed=true');
+    expect(callUrl).toContain('from_block=100');
+    expect(callUrl).toContain('to_block=200');
+    expect(callUrl).toContain('from_time=2026-01-01');
+    expect(callUrl).toContain('to_time=2026-02-01');
+    // The count route is distinct from the list route and the mutating surface.
+    expect(callUrl).not.toContain('/poe/');
+  });
+
+  it('sends only the signer when no narrowing filters are supplied', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ object: 'count', count: 0, url: '/api/v1/records/count' }));
+    await makeClient(fetchMock).records.count({ signer: SIGNER });
+    const callUrl = String(fetchMock.mock.calls[0]![0]);
+    expect(callUrl).toBe(`http://test.example/api/v1/records/count?signer=${SIGNER}`);
+    expect(callUrl).not.toContain('scheme');
+    expect(callUrl).not.toContain('sealed');
+  });
+
+  it('surfaces the gateway 422 (signer-less count) as ValidationFailedError', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      problemResponse(
+        {
+          type: 'about:blank',
+          title: 'Validation Failed',
+          status: 422,
+          detail: 'a records count must be scoped to a publisher: supply a signer',
+          code: 'validation-failed',
+          trace_id: '01977c00-0000-7000-8000-000000000000',
+        },
+        422,
+      ),
+    );
+    await expect(makeClient(fetchMock).records.count({ signer: SIGNER })).rejects.toMatchObject({
+      code: 'validation-failed',
+      httpStatus: 422,
+    });
+  });
+});
+
 describe('RecordsNamespace.get', () => {
-  it('GETs /api/v1/records/{tx_hash} with Bearer auth and returns the parsed RecordResource', async () => {
+  it('GETs /records/{tx_hash} with Bearer auth and returns the parsed RecordResource', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(recordFixture()));
     const client = makeClient(fetchMock);
 
@@ -193,8 +241,9 @@ describe('RecordsNamespace.get', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe(`http://test.example/api/v1/records/${TX_HASH}`);
-    // The dead /api/v1/poe/{tx_hash} URL must never appear on the wire.
-    expect(String(url)).not.toContain('/api/v1/poe/');
+    // The dead /poe/{tx_hash} route must never appear on the wire — records
+    // reads route through /records, not the mutating /poe surface.
+    expect(String(url)).not.toContain('/poe/');
     expect((init as RequestInit).method).toBe('GET');
     const headers = (init as RequestInit).headers as Headers;
     expect(headers.get('authorization')).toMatch(/^Bearer sk-cw-live-/);
@@ -247,78 +296,6 @@ describe('RecordsNamespace.get', () => {
   });
 });
 
-describe('RecordsNamespace.verify', () => {
-  it('POSTs /api/v1/records/{tx_hash}/verify with the JSON body and parses VerifyReport', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(verifyReportFixture()));
-    const client = makeClient(fetchMock);
-
-    const out = await client.records.verify(TX_HASH, { fetch_content: false });
-
-    // Response is parsed into the typed VerifyReport.
-    expect(out.txHash).toBe(TX_HASH);
-    expect(out.verdict).toBe('valid');
-    expect(out.exitCode).toBe(0);
-    expect(out.issues).toEqual([]);
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe(`http://test.example/api/v1/records/${TX_HASH}/verify`);
-    expect(String(url)).not.toContain('/api/v1/poe/');
-    expect((init as RequestInit).method).toBe('POST');
-    // Body MUST contain the caller-supplied fetch_content flag — proves the
-    // body is round-tripped (not just an input mock-assert against itself).
-    // The endpoint is the hosted PUBLIC verifier: `fetch_content` is the ONLY
-    // accepted field, so this also pins that the client wire body carries no
-    // decryption credentials.
-    const body = JSON.parse(String((init as RequestInit).body));
-    expect(body).toEqual({ fetch_content: false });
-  });
-
-  it('whitelist-builds the wire body — unknown caller-supplied fields never reach the gateway', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(verifyReportFixture()));
-    // An untyped call site (plain JS, or a TS caller casting through `any`)
-    // can smuggle arbitrary properties — including decryption credentials —
-    // into the input object. The client must drop everything except the
-    // known `fetch_content` field, asserted here on the raw body bytes.
-    const poisoned = {
-      fetch_content: false,
-      decryption: [{ recipientSecretKey: 'SECRET' }],
-      verify_uris: ['x'],
-    } as PoeVerifyInput;
-    await makeClient(fetchMock).records.verify(TX_HASH, poisoned);
-
-    const body = String((fetchMock.mock.calls[0]![1] as RequestInit).body);
-    expect(body).toBe('{"fetch_content":false}');
-    expect(body).not.toContain('SECRET');
-  });
-
-  it('sends an empty JSON body when no input is provided', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(verifyReportFixture()));
-    await makeClient(fetchMock).records.verify(TX_HASH);
-    const body = JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body));
-    expect(body).toEqual({});
-  });
-
-  it('throws RecordNotFoundError on 404', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      problemResponse(
-        {
-          type: 'https://cardanowall.com/problems/record-not-found',
-          title: 'Record Not Found',
-          status: 404,
-          detail: 'No record is indexed under that transaction hash.',
-          code: 'record-not-found',
-          trace_id: '01977c00-0000-7000-8000-000000000000',
-        },
-        404,
-      ),
-    );
-    await expect(makeClient(fetchMock).records.verify(TX_HASH)).rejects.toBeInstanceOf(
-      RecordNotFoundError,
-    );
-  });
-});
-
 describe('RecordsNamespace request-shape parity fixture', () => {
   // Capture the exact HTTP request shape both SDKs (TS + Py) must produce for
   // the canonical client.records.get(TX_HASH) call. The fixture JSON at
@@ -347,7 +324,7 @@ describe('RecordsNamespace request-shape parity fixture', () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(recordFixture()));
     const client = new Label309Client({
       apiKey: `sk-cw-live-${'b'.repeat(52)}`,
-      baseUrl: 'http://test.example',
+      baseUrl: 'http://test.example/api/v1',
       fetch: fetchMock as unknown as typeof globalThis.fetch,
     });
     await client.records.get(TX_HASH);

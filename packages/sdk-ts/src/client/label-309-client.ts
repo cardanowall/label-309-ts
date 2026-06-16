@@ -19,10 +19,13 @@ function resolveFetch(provided: FetchImpl | undefined): FetchImpl {
  * Resolves the gateway base URL the client targets.
  *
  * `baseUrl` is REQUIRED and is used verbatim — the client is gateway-agnostic
- * and binds to no particular deployment. A missing or empty `baseUrl` is a
- * configuration error: there is nowhere to send requests. Trailing slashes are
- * stripped so callers may pass `https://gw.example.com/` or
- * `https://gw.example.com` interchangeably.
+ * and binds to no particular deployment. It MUST include the API version
+ * segment (e.g. `https://gw.example.com/api/v1`); the client appends only the
+ * bare resource suffix (`/records`, `/poe/quote`, …), so the version and any
+ * proxy path prefix live entirely in this value. A missing or empty `baseUrl`
+ * is a configuration error: there is nowhere to send requests. At most one
+ * trailing slash is stripped, so `https://gw.example.com/api/v1/` and
+ * `https://gw.example.com/api/v1` are interchangeable.
  *
  * The `apiKey`, when present, is an OPAQUE bearer token forwarded verbatim as
  * `Authorization: Bearer <apiKey>`. It is never parsed, validated, or used to
@@ -33,8 +36,9 @@ function resolveBaseUrl(config: Label309ClientConfig): string {
   const baseUrl = config.baseUrl?.trim();
   if (baseUrl === undefined || baseUrl === '') {
     throw new InvalidClientConfigError(
-      'Label309Client: baseUrl is required. Pass the base URL of the Label 309 ' +
-        'gateway you are targeting (e.g. https://gateway.example.com).',
+      'Label309Client: baseUrl is required. Pass the full base URL of the Label 309 ' +
+        'gateway you are targeting, including the API version segment ' +
+        '(e.g. https://gateway.example.com/api/v1).',
     );
   }
   return baseUrl.replace(/\/$/, '');
@@ -48,9 +52,11 @@ export class Label309Client {
   /**
    * Construct a client against a Label 309 gateway.
    *
-   * `config.baseUrl` is required — there is no default deployment. The
-   * `config.apiKey`, when supplied, is an opaque bearer token sent verbatim as
-   * `Authorization: Bearer <apiKey>`; omit it for anonymous read-only access.
+   * `config.baseUrl` is required and must include the API version segment
+   * (e.g. `https://gateway.example.com/api/v1`) — there is no default
+   * deployment. The `config.apiKey`, when supplied, is an opaque bearer token
+   * sent verbatim as `Authorization: Bearer <apiKey>`; omit it for anonymous
+   * read-only access.
    *
    * PoE submissions debit the gateway's own balance model. Acquire a price lock
    * via `client.poe.quote(...)` first; the resulting `quote_id` is consumed by

@@ -65,19 +65,20 @@ When you already hold the metadata bytes from an indexer mirror, skip the chain 
 
 ### Talk to a gateway (publish, read, balance)
 
-`baseUrl` is **required** — the client binds to no particular deployment. `apiKey`, when present, is an **opaque** bearer token forwarded verbatim as `Authorization: Bearer <apiKey>`; the SDK never parses or assumes its format. Omit it for anonymous read-only use.
+`baseUrl` is **required** and must include the API version segment (e.g. `https://gateway.example.com/api/v1`) — the client binds to no particular deployment and appends only the bare resource suffix, so the version (and any proxy path prefix) lives entirely in this value. `apiKey`, when present, is an **opaque** bearer token forwarded verbatim as `Authorization: Bearer <apiKey>`; the SDK never parses or assumes its format. Omit it for anonymous read-only use.
 
 ```ts
 import { Label309Client } from '@cardanowall/sdk-ts';
 
 const client = new Label309Client({
-  baseUrl: 'https://gateway.example.com', // any Label 309 gateway
+  baseUrl: 'https://gateway.example.com/api/v1', // any Label 309 gateway; include the version segment
   apiKey: process.env.LABEL309_API_KEY, // opaque; omit for anonymous reads
 });
 
 // Read surface — no auth required for public records.
 const record = await client.records.get('<tx hash>');
-const report = await client.records.verify('<tx hash>'); // returns a VerifyReport
+// To verify a record, run the standalone verifier (see above) — the gateway
+// hosts no verify endpoint, so a verdict never depends on trusting a server.
 
 // Authenticated read.
 const { balanceUsdMicros } = await client.account.balance(); // decimal string, never coerced

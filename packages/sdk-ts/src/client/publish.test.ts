@@ -25,7 +25,7 @@ function jsonResponse(body: unknown, status = 202): Response {
 
 function makeClient(fetchMock: ReturnType<typeof vi.fn>): Label309Client {
   return new Label309Client({
-    baseUrl: 'https://cardanowall.com',
+    baseUrl: 'https://cardanowall.com/api/v1',
     apiKey: 'opaque-bearer-token',
     fetch: fetchMock as unknown as typeof globalThis.fetch,
   });

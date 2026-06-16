@@ -1,4 +1,4 @@
-// 400 batch-too-large — the `records[]` array on `/api/v1/poe/publish-batch`
+// 400 batch-too-large — the `records[]` array on `/poe/publish-batch`
 // carries more entries than the per-call ceiling (max 50).
 //
 // Wire-format extension members:

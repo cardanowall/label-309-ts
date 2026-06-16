@@ -246,8 +246,25 @@ function wrapSlotMlkem768X25519(args: {
   return { kem_ct: enc, wrap };
 }
 
-export function eciesSealedPoeWrap(args: WrapArgs): SealedPoeOutput {
-  const { plaintext, recipientPublicKeys } = args;
+// The envelope half of the wrap, factored out so the streaming sealer can reuse
+// it verbatim. It performs all input validation, derives the CEK+nonce, builds
+// (and shuffles) the slots, and computes slots_mac — everything EXCEPT sealing
+// the body. It returns the finished envelope plus the derived `payloadKey`, so a
+// caller can stream the content under the same key the buffered `streamSeal`
+// would use. The envelope depends only on CEK, nonce, recipients, and hashes —
+// never on the plaintext — so it is fully resolved before a single content byte
+// is read.
+export interface SealedEnvelopeBuild {
+  readonly envelope: SealedEnvelope;
+  readonly payloadKey: Uint8Array;
+}
+
+// Input to `buildSealedEnvelope`: the wrap args minus `plaintext` (the body is
+// the streaming/buffered caller's concern, not the envelope's).
+export type EnvelopeArgs = Omit<WrapArgs, 'plaintext'>;
+
+export function buildSealedEnvelope(args: EnvelopeArgs): SealedEnvelopeBuild {
+  const { recipientPublicKeys } = args;
   const kem: SealedKem = args.kem ?? 'x25519';
   const n = recipientPublicKeys.length;
 
@@ -401,12 +418,15 @@ export function eciesSealedPoeWrap(args: WrapArgs): SealedPoeOutput {
   // the CEK salted by the envelope-unique nonce), never under the CEK directly,
   // in the segmented STREAM format. There is no content AAD: the content binds
   // to the header transitively — payload_key derives from the CEK, and the CEK
-  // is committed to the full header (including hashes_hash) by slots_mac.
-  const ciphertext = streamSeal({
-    payloadKey: slotsPayloadKey({ cek, nonce }),
-    plaintext,
-  });
+  // is committed to the full header (including hashes_hash) by slots_mac. The
+  // key is derived here (not in the caller) so the buffered and streaming seal
+  // paths share one derivation.
+  return { envelope, payloadKey: slotsPayloadKey({ cek, nonce }) };
+}
 
+export function eciesSealedPoeWrap(args: WrapArgs): SealedPoeOutput {
+  const { envelope, payloadKey } = buildSealedEnvelope(args);
+  const ciphertext = streamSeal({ payloadKey, plaintext: args.plaintext });
   return { envelope, ciphertext };
 }
 

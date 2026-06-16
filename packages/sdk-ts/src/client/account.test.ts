@@ -1,5 +1,6 @@
 // Unit tests for client.account.* — the account read namespace that wraps
-// `GET /api/v1/account/balance`.
+// `GET /account/balance` (the bare suffix the client appends to the
+// version-carrying base URL).
 //
 // Asserts on the actual HTTP request shape (URL, method, auth header) AND on
 // the response being parsed into the typed `AccountBalance`, with the wire
@@ -29,13 +30,13 @@ function problemResponse(body: Record<string, unknown>, status: number): Respons
 function makeClient(fetchMock: ReturnType<typeof vi.fn>): Label309Client {
   return new Label309Client({
     apiKey: `sk-cw-live-${'a'.repeat(52)}`,
-    baseUrl: 'http://test.example',
+    baseUrl: 'http://test.example/api/v1',
     fetch: fetchMock as unknown as typeof globalThis.fetch,
   });
 }
 
 describe('AccountNamespace.balance', () => {
-  it('GETs /api/v1/account/balance with Bearer auth and maps balance_usd_micros to a string', async () => {
+  it('GETs /account/balance with Bearer auth and maps balance_usd_micros to a string', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ balance_usd_micros: '1234567' }));
     const client = makeClient(fetchMock);
 

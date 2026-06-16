@@ -11,6 +11,7 @@ export * from './ids/index';
 //   `import { merkle, hash } from '@cardanowall/sdk-ts'`.
 export * as merkle from './merkle/index';
 export * as hash from './hash/index';
+export * as certificate from './certificate/index';
 
 export {
   validatePoeRecord,

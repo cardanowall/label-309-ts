@@ -19,10 +19,15 @@ export interface Label309ClientConfig {
    */
   readonly apiKey?: string;
   /**
-   * Base URL of the Label 309 gateway, e.g. `https://gateway.example.com`.
-   * REQUIRED — the client is gateway-agnostic and has no default deployment.
-   * Used VERBATIM (a single trailing slash is stripped). A missing or empty
-   * value throws `InvalidClientConfigError` from the constructor.
+   * Base URL of the Label 309 gateway, INCLUDING the API version segment —
+   * e.g. `https://gateway.example.com/api/v1` (a proxied deployment may carry a
+   * path prefix, e.g. `https://host/gw/api/v1`). REQUIRED — the client is
+   * gateway-agnostic and has no default deployment. The SDK appends only the
+   * bare resource suffix (`/records`, `/poe/quote`, …) to this value, so the
+   * version lives entirely in your configuration: a future `/api/v2` gateway is
+   * reached by configuring `…/api/v2`, with no SDK change. Used VERBATIM (a
+   * single trailing slash is stripped). A missing or empty value throws
+   * `InvalidClientConfigError` from the constructor.
    */
   readonly baseUrl: string;
   /** Optional custom fetch (defaults to `globalThis.fetch`). */
@@ -30,7 +35,7 @@ export interface Label309ClientConfig {
 }
 
 // =============================================================================
-// POST /api/v1/poe/uploads — multipart binary upload to a storage backend
+// POST /poe/uploads — multipart binary upload to a storage backend
 // =============================================================================
 //
 // The SDK presents the wire shape directly: caller passes a `target` enum and
@@ -43,7 +48,7 @@ export interface Label309ClientConfig {
 // re-uploading the successful ones.
 //
 // Billing: free. The storage cost is part of the publish quote (POST
-// /api/v1/poe/quote → POST /api/v1/poe/publish); it is debited once at
+// /poe/quote → POST /poe/publish); it is debited once at
 // publish time against the locked price snapshot.
 
 export type StorageTarget = 'arweave';
@@ -76,7 +81,7 @@ export interface UploadsResponse {
 }
 
 // =============================================================================
-// Resumable / chunked upload session — /api/v1/poe/uploads/sessions/*
+// Resumable / chunked upload session — /poe/uploads/sessions/*
 // =============================================================================
 //
 // A file larger than a client threshold is uploaded as a content-addressed
@@ -93,7 +98,7 @@ export interface UploadsResponse {
 // ceiling, both of which the client honours.
 
 /**
- * Body of `POST /api/v1/poe/uploads/sessions`. `sha256` is the lowercase-hex
+ * Body of `POST /poe/uploads/sessions`. `sha256` is the lowercase-hex
  * digest of the WHOLE file; `chunk_bytes` is the client's requested chunk size,
  * which the server clamps to `max_chunk_bytes` and echoes back authoritatively.
  */
@@ -145,7 +150,7 @@ export interface UploadSessionChunkResponse {
 export type UploadSessionState = 'open' | 'assembling' | 'completed' | 'failed' | 'expired';
 
 /**
- * `GET /api/v1/poe/uploads/sessions/{sid}` — the resume contract. A
+ * `GET /poe/uploads/sessions/{sid}` — the resume contract. A
  * reconnecting client reads `missing` and re-PUTs only those indices.
  */
 export interface UploadSessionStatus {
@@ -163,9 +168,9 @@ export interface UploadSessionStatus {
 }
 
 /**
- * `POST /api/v1/poe/uploads/sessions/{sid}/complete`. Either the terminal
+ * `POST /poe/uploads/sessions/{sid}/complete`. Either the terminal
  * committed/dedup outcome (`ok`), or `accepted` with an `attempt_id` to poll via
- * `GET /api/v1/poe/uploads/attempts/{attempt_id}`.
+ * `GET /poe/uploads/attempts/{attempt_id}`.
  */
 export interface UploadSessionCompletedResponse {
   readonly ok: true;
@@ -189,7 +194,7 @@ export type UploadSessionCompleteResponse =
   | UploadSessionAcceptedResponse;
 
 /**
- * `GET /api/v1/poe/uploads/attempts/{attempt_id}` — the terminal poll target
+ * `GET /poe/uploads/attempts/{attempt_id}` — the terminal poll target
  * shared with the single-shot path.
  *
  *   - `reserved`  — still in flight; keep polling.
@@ -244,6 +249,25 @@ export type UploadAttemptStatus =
 // -----------------------------------------------------------------------------
 
 /**
+ * Per-chunk upload progress, passed to `UploadResumableInput.onProgress` after
+ * each chunk is durably accepted by the gateway. `bytesSent` and `chunkIndex`
+ * count only chunks uploaded in THIS invocation; on a resume that adopts already
+ * stored chunks they advance from the missing set, not from zero, so a UI should
+ * treat `bytesSent / totalBytes` as the fraction of the work this call performs.
+ * The single-shot path reports one terminal 100% callback.
+ */
+export interface UploadProgress {
+  /** Bytes durably accepted so far in this invocation. */
+  readonly bytesSent: number;
+  /** Declared total byte count of the file. */
+  readonly totalBytes: number;
+  /** Index of the chunk just accepted (0-based); `0` for the single-shot path. */
+  readonly chunkIndex: number;
+  /** Total number of chunks in the grid; `1` for the single-shot path. */
+  readonly chunksTotal: number;
+}
+
+/**
  * Input to `uploadResumable()`. The `source` works in both runtimes: a
  * `Blob`/`File` in the browser, a `Uint8Array`, a filesystem path string, or a
  * pre-adapted `ResumableSource` on the server. The helper uploads at most one
@@ -287,6 +311,21 @@ export interface UploadResumableInput {
   readonly sessionId?: string;
   /** Abort signal forwarded to every underlying request. */
   readonly signal?: AbortSignal;
+  /**
+   * Invoked once the chunked session is created, BEFORE any chunk PUT, with the
+   * server-issued `session_id`. Persist it immediately so a crash after create
+   * but before this helper returns can still resume the upload with `sessionId`.
+   * Not fired on the single-shot path (there is no session) or on a create-time
+   * dedup hit. Errors thrown here propagate to the caller.
+   */
+  readonly onSessionCreated?: (sessionId: string) => void;
+  /**
+   * Invoked after each chunk is durably accepted (and once at 100% on the
+   * single-shot path), with cumulative progress for THIS invocation. Throwing
+   * from this callback aborts the upload. Progress reflects only work done in
+   * this call — a resume starts its count from the missing set, not from zero.
+   */
+  readonly onProgress?: (progress: UploadProgress) => void;
 }
 
 /** Result of `uploadResumable()` — the committed storage location. */
@@ -304,7 +343,7 @@ export interface UploadResumableResult {
 }
 
 // =============================================================================
-// POST /api/v1/poe/quote — lock the price for an upcoming /publish call
+// POST /poe/quote — lock the price for an upcoming /publish call
 // =============================================================================
 //
 // The gateway prices the described publish (from the supplied byte counts),
@@ -328,10 +367,29 @@ export interface QuoteInput {
 }
 
 /**
- * An opaque price lock returned by `POST /api/v1/poe/quote`. It is a sealed
- * price token, not a pricing breakdown: pass `quote_id` to `/publish` and
- * surface `amount` / `currency` / `expires_at` to the user. The gateway's
- * pricing internals (FX, margins, per-component costs) are not exposed.
+ * The per-component cost split a gateway MAY attach to a quote. Each field is a
+ * USD micro-cents decimal STRING (1 USD = 1,000,000 micros), parallel to
+ * `QuoteResponse.usd_micros`. Present only when the gateway opts to surface its
+ * breakdown; a gateway that keeps the quote fully opaque omits it.
+ */
+export interface QuoteBreakdown {
+  /** Cardano transaction fee component, USD micro-cents (decimal string). */
+  readonly network_usd_micros: string;
+  /** Arweave storage component, USD micro-cents (decimal string). */
+  readonly storage_usd_micros: string;
+  /** Service/margin component, USD micro-cents (decimal string). */
+  readonly service_usd_micros: string;
+}
+
+/**
+ * The price lock returned by `POST /poe/quote`. The core token is `quote_id`
+ * (pass to `/publish`) plus `amount` / `currency` / `expires_at` to surface to
+ * the user.
+ *
+ * The remaining fields are an OPTIONAL pricing breakdown a gateway MAY attach
+ * (the CardanoWall dashboard reads them); a gateway that keeps the quote fully
+ * opaque omits every one and the response still parses. They are additive and
+ * MUST NOT be relied on as present.
  */
 export interface QuoteResponse {
   /** Opaque id of the persisted price lock; pass to /publish. */
@@ -342,10 +400,27 @@ export interface QuoteResponse {
   readonly currency: string;
   /** ISO8601 expiry timestamp after which the gateway rejects the quote. */
   readonly expires_at: string;
+  /**
+   * Total price as USD micro-cents (decimal string) — the same value `amount`
+   * carries when the gateway prices in USD, exposed in the canonical micro-cents
+   * unit. Optional.
+   */
+  readonly usd_micros?: string;
+  /** Optional per-component cost split (see {@link QuoteBreakdown}). */
+  readonly breakdown?: QuoteBreakdown;
+  /** Markup fraction the gateway applied, as a JSON number (e.g. 0.15). Optional. */
+  readonly margin_pct?: number;
+  /**
+   * How the margin was attributed (e.g. `account-override` vs an operator
+   * default). Opaque string; optional.
+   */
+  readonly margin_source?: string;
+  /** Age of the FX snapshot used to price the quote, in seconds. Optional. */
+  readonly fx_age_seconds?: number;
 }
 
 // =============================================================================
-// POST /api/v1/poe/publish — finalised single-record submission (JSON only)
+// POST /poe/publish — finalised single-record submission (JSON only)
 // =============================================================================
 //
 // `record` carries the canonical-CBOR record bytes — either as raw `Uint8Array`
@@ -364,13 +439,27 @@ export interface RecordSignature {
 
 export interface PublishInput {
   readonly record: Uint8Array | string;
-  /** UUID returned by POST /api/v1/poe/quote. */
+  /** UUID returned by POST /poe/quote. */
   readonly quoteId: string;
   readonly signatures?: ReadonlyArray<RecordSignature>;
   readonly idempotencyKey?: string;
 }
 
-export type PoeStatus = 'submitting' | 'submitted' | 'confirmed' | 'permanent_failure';
+/**
+ * Publish lifecycle status as carried by the publish responses and
+ * `GET /poe/events/<id>`. The named members are the values the gateway emits
+ * today; the `(string & {})` arm keeps the union forward-tolerant so a status a
+ * newer gateway introduces still parses (and still autocompletes the known
+ * members) instead of failing the type.
+ */
+export type PoeStatus =
+  | 'submitting'
+  | 'submitted'
+  | 'confirming'
+  | 'confirmed'
+  | 'permanent_failure'
+  | 'failed'
+  | (string & {});
 export type ConformanceProfile = 'core' | 'signed' | 'sealed' | 'recipient-sealed';
 
 export interface PoeItemResponse {
@@ -384,7 +473,7 @@ export interface PublishResponse {
   /** Wire-format prefixed id (`poe_<26-char-crockford-base32>`) of the
    *  freshly-inserted `poe_record` row. Stable across the submit→confirm
    *  lifecycle; use it to subscribe to live status frames via
-   *  `GET /api/v1/poe/events/<id>`. */
+   *  `GET /poe/events/<id>`. */
   readonly id: string;
   readonly tx_hash: string | null;
   readonly status: PoeStatus;
@@ -404,7 +493,7 @@ export interface PublishResponse {
 }
 
 // =============================================================================
-// POST /api/v1/poe/publish-batch — 1..50 finalised records as independent txs
+// POST /poe/publish-batch — 1..50 finalised records as independent txs
 // =============================================================================
 //
 // Partial-success: per-record errors land in `results[]` without rolling back
@@ -413,7 +502,7 @@ export interface PublishResponse {
 
 export interface PublishBatchEntry {
   readonly record: Uint8Array | string;
-  /** UUID returned by POST /api/v1/poe/quote, scoped to this record. */
+  /** UUID returned by POST /poe/quote, scoped to this record. */
   readonly quoteId: string;
   readonly signatures?: ReadonlyArray<RecordSignature>;
 }
@@ -464,11 +553,11 @@ export interface PublishBatchResponse {
 }
 
 // =============================================================================
-// GET /api/v1/records/{tx_hash} — single record resource (Stripe-style)
+// GET /records/{tx_hash} — single record resource (Stripe-style)
 // =============================================================================
 //
 // `RecordResource` is also the per-row shape projected into `data[]` of
-// `GET /api/v1/records`. snake_case wire field names, owner-only `account_id`
+// `GET /records`. snake_case wire field names, owner-only `account_id`
 // omitted for anonymous + cross-account callers.
 //
 // `status` carries the chain-derived lifecycle ('confirming' / 'confirmed')
@@ -495,7 +584,7 @@ export interface RecordResource {
 }
 
 // =============================================================================
-// GET /api/v1/records — paginated record list (client.records.list)
+// GET /records — paginated record list (client.records.list)
 // =============================================================================
 //
 // The optional `sealed` filter narrows the page to sealed records addressed to
@@ -535,7 +624,48 @@ export interface RecordsListResponse {
 }
 
 // =============================================================================
-// GET /api/v1/account/balance
+// GET /records/count — exact count of records matching a filter
+// =============================================================================
+//
+// The counting counterpart to `GET /records`: the paginated feed never carries
+// a total, so a caller that needs the cardinality of a filter (a profile's proof
+// count, an explorer facet) asks here. It accepts the same narrowing grammar as
+// `list`, but `signer` is REQUIRED — a count's cost is the size of the matching
+// set, which only a signer scope bounds, so the gateway rejects a signer-less
+// count with 422. The count is over the public anchored set only and carries no
+// owner-only projection.
+
+export interface RecordsCountInput {
+  /**
+   * 64 lowercase-hex characters (a 32-byte Ed25519 publisher key). REQUIRED:
+   * the gateway 422s a count without a signer, since a signer is the only filter
+   * that bounds the count's cost.
+   */
+  readonly signer: string;
+  /** Narrow to a single record scheme: 0 (open), 1 (sealed), or 2 (passphrase). */
+  readonly scheme?: RecordScheme;
+  /** Narrow to sealed records (scheme != 0). */
+  readonly sealed?: boolean;
+  /** Inclusive lower bound on block height. */
+  readonly fromBlock?: number;
+  /** Inclusive upper bound on block height. */
+  readonly toBlock?: number;
+  /** Inclusive lower bound on block time (ISO8601). */
+  readonly fromTime?: string;
+  /** Inclusive upper bound on block time (ISO8601). */
+  readonly toTime?: string;
+}
+
+export interface RecordsCountResponse {
+  readonly object: 'count';
+  /** The exact number of records matching the filter. */
+  readonly count: number;
+  /** The canonical resource path the count was served from. */
+  readonly url: string;
+}
+
+// =============================================================================
+// GET /account/balance
 // =============================================================================
 
 /**
@@ -551,29 +681,6 @@ export interface AccountBalance {
 }
 
 // =============================================================================
-// POST /api/v1/records/{tx_hash}/verify
-// =============================================================================
-
-/**
- * Request body for the hosted verify endpoint.
- *
- * The endpoint is a PUBLIC verifier — structural validation plus record-level
- * signature verification over public chain data. It accepts no decryption
- * credentials: a body carrying any is rejected with 400 validation-failed,
- * and sealed (enc-bearing) items report as unverifiable without decryption.
- * Recipient verification (sealed-envelope decrypt + plaintext-hash recheck)
- * runs locally — use the `verifier` module's `decryption` input, which never
- * leaves the process.
- *
- * `fetch_content` is the master content-fetch switch (item URIs and Merkle
- * leaves lists alike). The server defaults it to `true`; pass `false` to skip
- * content re-fetching — affected claims then report `not_checked`.
- */
-export interface PoeVerifyInput {
-  readonly fetch_content?: boolean;
-}
-
-// =============================================================================
 // High-level publish helpers (publishContent / publishSealed / publishMerkle)
 // =============================================================================
 //
@@ -584,7 +691,7 @@ export interface PoeVerifyInput {
 //   - publishSealed({content, recipients, quoteId, signer?})   — sealed envelope
 //   - publishMerkle({leaves, quoteId, signer?})                — Merkle batch root
 //
-// Each takes a `quoteId` obtained from a prior call to POST /api/v1/poe/quote.
+// Each takes a `quoteId` obtained from a prior call to POST /poe/quote.
 //
 // Signer architecture (see `off-host-sign.ts` privacy contract): the SDK does
 // NOT carry identity keys. Callers pass a `Signer` that owns the Ed25519
@@ -617,7 +724,7 @@ export type SupportedHashAlg = 'sha2-256' | 'blake2b-256';
 export interface PublishContentInput {
   /** Content bytes to anchor. Strings are UTF-8 encoded before hashing. */
   readonly content: Uint8Array | string;
-  /** UUID returned by POST /api/v1/poe/quote. */
+  /** UUID returned by POST /poe/quote. */
   readonly quoteId: string;
   /** Hash algorithm registered in the Label 309 hash registry. */
   readonly hashAlg?: SupportedHashAlg;
@@ -636,7 +743,7 @@ export interface PublishContentInput {
  */
 export interface PublishPrehashedInput {
   readonly hashes: Partial<Record<SupportedHashAlg, string>>;
-  /** UUID returned by POST /api/v1/poe/quote. */
+  /** UUID returned by POST /poe/quote. */
   readonly quoteId: string;
   readonly signer?: Signer;
   readonly idempotencyKey?: string;
@@ -660,7 +767,7 @@ export interface PublishSealedInput {
    * `kem`: 32 bytes for `x25519`, 1216 bytes for `mlkem768x25519` (X-Wing).
    */
   readonly recipients: ReadonlyArray<Uint8Array>;
-  /** UUID returned by POST /api/v1/poe/quote. */
+  /** UUID returned by POST /poe/quote. */
   readonly quoteId: string;
   /** Hash algorithm for the plaintext-bind hash in `items[0].hashes`. */
   readonly hashAlg?: SupportedHashAlg;
@@ -681,7 +788,7 @@ export interface PublishMerkleInput {
    * strings (64 chars, case-insensitive). Tree size is `leaves.length`.
    */
   readonly leaves: ReadonlyArray<Uint8Array | string>;
-  /** UUID returned by POST /api/v1/poe/quote. */
+  /** UUID returned by POST /poe/quote. */
   readonly quoteId: string;
   /**
    * Leaf-hash algorithm. Only `'sha2-256'` is supported in v1 because the

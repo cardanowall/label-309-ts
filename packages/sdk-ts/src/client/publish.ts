@@ -229,7 +229,7 @@ async function postPublish(
   idempotencyKey: string | undefined,
 ): Promise<PublishResponse> {
   const body = { record: recordBytesHex, quote_id: quoteId };
-  const response = await config.fetch(`${config.baseUrl}/api/v1/poe/publish`, {
+  const response = await config.fetch(`${config.baseUrl}/poe/publish`, {
     method: 'POST',
     headers: buildJsonHeaders(config.apiKey, idempotencyKey),
     body: JSON.stringify(body),
@@ -252,7 +252,7 @@ const singleShotUpload =
       new Blob([bytes as unknown as ArrayBuffer], { type: 'application/octet-stream' }),
       'file_0.bin',
     );
-    const response = await config.fetch(`${config.baseUrl}/api/v1/poe/uploads`, {
+    const response = await config.fetch(`${config.baseUrl}/poe/uploads`, {
       method: 'POST',
       headers: buildMultipartHeaders(config.apiKey, idempotencyKey),
       body: form,

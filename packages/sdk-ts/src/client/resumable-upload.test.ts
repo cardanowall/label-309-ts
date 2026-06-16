@@ -35,7 +35,7 @@ function problemResponse(code: string, status: number, detail = code): Response 
 
 function makeClient(fetchMock: ReturnType<typeof vi.fn>): Label309Client {
   return new Label309Client({
-    baseUrl: 'https://cardanowall.com',
+    baseUrl: 'https://cardanowall.com/api/v1',
     apiKey: 'opaque-bearer-token',
     fetch: fetchMock as unknown as typeof globalThis.fetch,
   });
@@ -90,6 +90,7 @@ function makeFakeGateway(opts: FakeGatewayOptions) {
     complete: 0,
     attempt: 0,
     singleShot: 0,
+    abandon: 0,
   };
 
   const received = (): number[] => [...stored.keys()].sort((a, b) => a - b);
@@ -110,8 +111,10 @@ function makeFakeGateway(opts: FakeGatewayOptions) {
     const method = (init?.method ?? 'GET').toUpperCase();
     const path = new URL(u).pathname;
 
-    // Single-shot multipart (below-threshold path).
-    if (path === '/api/v1/poe/uploads' && method === 'POST') {
+    // Single-shot multipart (below-threshold path). The client carries the
+    // version segment in its base URL and appends the bare `/poe/uploads`
+    // suffix, so the in-memory gateway matches on the suffix it serves.
+    if (path.endsWith('/poe/uploads') && method === 'POST') {
       calls.singleShot++;
       return jsonResponse({
         uploads: [
@@ -127,7 +130,7 @@ function makeFakeGateway(opts: FakeGatewayOptions) {
     }
 
     // Create session.
-    if (path === '/api/v1/poe/uploads/sessions' && method === 'POST') {
+    if (path.endsWith('/poe/uploads/sessions') && method === 'POST') {
       calls.create++;
       const body = JSON.parse(init!.body as string) as {
         total_bytes: number;
@@ -186,6 +189,12 @@ function makeFakeGateway(opts: FakeGatewayOptions) {
         remaining: missing().length,
         complete: missing().length === 0,
       });
+    }
+
+    // Abandon (DELETE the session). The gateway replies 204 No Content.
+    if (path.match(/\/sessions\/([^/]+)$/) && method === 'DELETE') {
+      calls.abandon++;
+      return new Response(null, { status: 204 });
     }
 
     // Status (resume).
@@ -763,7 +772,7 @@ describe('uploadResumable — accepted completion', () => {
     const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit): Promise<Response> => {
       const path = new URL(typeof url === 'string' ? url : url.toString()).pathname;
       const method = (init?.method ?? 'GET').toUpperCase();
-      if (path === '/api/v1/poe/uploads/sessions' && method === 'POST') {
+      if (path.endsWith('/poe/uploads/sessions') && method === 'POST') {
         const body = JSON.parse(init!.body as string) as { total_bytes: number };
         return jsonResponse(
           {
@@ -783,6 +792,12 @@ describe('uploadResumable — accepted completion', () => {
       }
       if (path.match(/\/sessions\/[^/]+\/complete$/) && method === 'POST') {
         return jsonResponse({ accepted: true, attempt_id: 'att-rel' });
+      }
+      // A released attempt is a terminal failure, so the driver abandons the
+      // session; the gateway answers the DELETE with 204. (Without this the
+      // abandon would mask the real ATTEMPT_FAILED reason with SESSION_FAILED.)
+      if (path.match(/\/sessions\/([^/]+)$/) && method === 'DELETE') {
+        return new Response(null, { status: 204 });
       }
       if (path.match(/\/uploads\/attempts\/([^/]+)$/) && method === 'GET') {
         polls++;
@@ -828,7 +843,7 @@ describe('uploadResumable — funding error at create', () => {
       const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
         const path = new URL(typeof url === 'string' ? url : url.toString()).pathname;
         if (
-          path === '/api/v1/poe/uploads/sessions' &&
+          path.endsWith('/poe/uploads/sessions') &&
           (init?.method ?? '').toUpperCase() === 'POST'
         ) {
           return problemResponse(code, 402, 'the account cannot fund this upload');
@@ -869,7 +884,7 @@ describe('uploadResumable — terminal chunk error fails fast', () => {
     const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit): Promise<Response> => {
       const path = new URL(typeof url === 'string' ? url : url.toString()).pathname;
       const method = (init?.method ?? 'GET').toUpperCase();
-      if (path === '/api/v1/poe/uploads/sessions' && method === 'POST') {
+      if (path.endsWith('/poe/uploads/sessions') && method === 'POST') {
         const body = JSON.parse(init!.body as string) as { total_bytes: number };
         return jsonResponse(
           {
@@ -886,6 +901,12 @@ describe('uploadResumable — terminal chunk error fails fast', () => {
       if (path.match(/\/sessions\/[^/]+\/chunks\/(\d+)$/) && method === 'PUT') {
         putCount++;
         return problemResponse(code, status);
+      }
+      // The terminal chunk error fails the upload, so the driver abandons the
+      // session; the gateway answers the DELETE with 204. (Without this the
+      // abandon would mask the real chunk problem code with SESSION_FAILED.)
+      if (path.match(/\/sessions\/([^/]+)$/) && method === 'DELETE') {
+        return new Response(null, { status: 204 });
       }
       throw new Error(`unexpected ${method} ${path}`);
     });
@@ -936,5 +957,313 @@ describe('uploadResumable — terminal chunk error fails fast', () => {
     // was not treated as terminal.
     expect(firstChunkPuts).toBeGreaterThanOrEqual(2);
     expect(bytesToHex(gw.assembled())).toBe(bytesToHex(file));
+  });
+});
+
+describe('uploadResumable — progress reporting', () => {
+  it('fires onProgress once per chunk with a monotonically growing byte count', async () => {
+    const gw = makeFakeGateway({ chunkBytes: 16, uri: `ar://${'P'.repeat(43)}` });
+    const client = makeClient(gw.fetchMock);
+
+    // 40 bytes / 16-byte chunks => 3 chunks (16, 16, 8).
+    const file = new Uint8Array(40).fill(0x5a);
+    const progress: Array<{ bytesSent: number; totalBytes: number; chunksTotal: number }> = [];
+    const result = await client.poe.uploadResumable({
+      source: file,
+      threshold: 16,
+      chunkBytes: 16,
+      parallelism: 1, // deterministic order for the assertion
+      onProgress: (p) => progress.push({ ...p }),
+    });
+
+    expect(result.uri).toBe(`ar://${'P'.repeat(43)}`);
+    // One callback per chunk; bytesSent reaches the full file size.
+    expect(progress).toHaveLength(3);
+    expect(progress.map((p) => p.bytesSent)).toEqual([16, 32, 40]);
+    expect(progress.every((p) => p.totalBytes === 40 && p.chunksTotal === 3)).toBe(true);
+  });
+
+  it('accumulates progress across all parallel chunks regardless of order', async () => {
+    const gw = makeFakeGateway({ chunkBytes: 16, uri: `ar://${'Q'.repeat(43)}` });
+    const client = makeClient(gw.fetchMock);
+
+    const file = new Uint8Array(40).fill(0x5b);
+    let maxBytes = 0;
+    let count = 0;
+    await client.poe.uploadResumable({
+      source: file,
+      threshold: 16,
+      chunkBytes: 16,
+      parallelism: 4,
+      onProgress: (p) => {
+        count++;
+        maxBytes = Math.max(maxBytes, p.bytesSent);
+      },
+    });
+    // 3 chunks => 3 callbacks; the final cumulative byte count is the whole file.
+    expect(count).toBe(3);
+    expect(maxBytes).toBe(40);
+  });
+
+  it('the single-shot path reports a single terminal 100% progress', async () => {
+    const gw = makeFakeGateway({ chunkBytes: 16, uri: `ar://${'S'.repeat(43)}` });
+    const client = makeClient(gw.fetchMock);
+
+    const small = new Uint8Array(8).fill(0xab);
+    const progress: Array<{ bytesSent: number; totalBytes: number; chunksTotal: number }> = [];
+    const result = await client.poe.uploadResumable({
+      source: small,
+      threshold: 64,
+      onProgress: (p) => progress.push({ ...p }),
+    });
+
+    expect(result.mode).toBe('single-shot');
+    // Exactly one callback, at 100%, with a single-chunk grid.
+    expect(progress).toHaveLength(1);
+    expect(progress[0]).toEqual({
+      bytesSent: result.bytes,
+      totalBytes: result.bytes,
+      chunkIndex: 0,
+      chunksTotal: 1,
+    });
+  });
+});
+
+describe('uploadResumable — early session id', () => {
+  it('fires onSessionCreated with the session id before any chunk PUT', async () => {
+    let sessionIdAtCallback: string | null = null;
+    let putsAtCallback = -1;
+    const gw = makeFakeGateway({ chunkBytes: 16, uri: `ar://${'I'.repeat(43)}` });
+    const client = makeClient(gw.fetchMock);
+
+    const file = new Uint8Array(40).fill(0x5c);
+    await client.poe.uploadResumable({
+      source: file,
+      threshold: 16,
+      chunkBytes: 16,
+      onSessionCreated: (sid) => {
+        sessionIdAtCallback = sid;
+        putsAtCallback = gw.calls.put;
+      },
+    });
+
+    // The callback fired with the server-issued id, and BEFORE any chunk PUT.
+    expect(sessionIdAtCallback).toBe('sess-0001');
+    expect(putsAtCallback).toBe(0);
+  });
+
+  it('does NOT fire onSessionCreated on the single-shot path or a create-time dedup', async () => {
+    // Single-shot: no session exists.
+    const gwSmall = makeFakeGateway({ chunkBytes: 16, uri: `ar://${'S'.repeat(43)}` });
+    let smallFired = false;
+    await makeClient(gwSmall.fetchMock).poe.uploadResumable({
+      source: new Uint8Array(8).fill(1),
+      threshold: 64,
+      onSessionCreated: () => {
+        smallFired = true;
+      },
+    });
+    expect(smallFired).toBe(false);
+
+    // Create-time dedup: the create short-circuits before a session id is issued.
+    const gwDedup = makeFakeGateway({
+      chunkBytes: 16,
+      dedupOnCreate: { uri: `ar://${'D'.repeat(43)}` },
+    });
+    let dedupFired = false;
+    const result = await makeClient(gwDedup.fetchMock).poe.uploadResumable({
+      source: new Uint8Array(40).fill(2),
+      threshold: 16,
+      chunkBytes: 16,
+      onSessionCreated: () => {
+        dedupFired = true;
+      },
+    });
+    expect(result.deduplicated).toBe(true);
+    expect(dedupFired).toBe(false);
+  });
+});
+
+describe('uploadResumable — a failure after the session exists abandons it', () => {
+  it('on abort during chunk upload, DELETEs the session and rejects', async () => {
+    const ac = new AbortController();
+    const gw = makeFakeGateway({ chunkBytes: 16, uri: `ar://${'A'.repeat(43)}` });
+    const original = gw.fetchMock.getMockImplementation()!;
+    // Abort once the first chunk PUT is in flight.
+    gw.fetchMock.mockImplementation(async (url, init) => {
+      const path = new URL(typeof url === 'string' ? url : url.toString()).pathname;
+      if (path.includes('/chunks/')) {
+        ac.abort();
+        throw new ResumableUploadError('ABORTED', 'upload aborted');
+      }
+      return original(url, init);
+    });
+    const client = makeClient(gw.fetchMock);
+
+    const file = new Uint8Array(40).fill(0x77);
+    await expect(
+      client.poe.uploadResumable({
+        source: file,
+        threshold: 16,
+        chunkBytes: 16,
+        parallelism: 1,
+        signal: ac.signal,
+      }),
+    ).rejects.toBeDefined();
+
+    // The session was created, then abandoned (DELETE) exactly once on abort.
+    expect(gw.calls.create).toBe(1);
+    expect(gw.calls.abandon).toBe(1);
+  });
+
+  it('surfaces a SESSION_FAILED naming the session id when the abandon itself fails', async () => {
+    const ac = new AbortController();
+    const gw = makeFakeGateway({ chunkBytes: 16 });
+    const original = gw.fetchMock.getMockImplementation()!;
+    gw.fetchMock.mockImplementation(async (url, init) => {
+      const path = new URL(typeof url === 'string' ? url : url.toString()).pathname;
+      const method = (init?.method ?? 'GET').toUpperCase();
+      // The abandon DELETE fails with a 500 (not a 404/410), so it is NOT
+      // idempotent-OK and must surface to the caller with the session id.
+      if (path.match(/\/sessions\/([^/]+)$/) && method === 'DELETE') {
+        return problemResponse('internal-error', 500);
+      }
+      if (path.includes('/chunks/')) {
+        ac.abort();
+        throw new ResumableUploadError('ABORTED', 'upload aborted');
+      }
+      return original(url, init);
+    });
+    const client = makeClient(gw.fetchMock);
+
+    const file = new Uint8Array(40).fill(0x88);
+    await expect(
+      client.poe.uploadResumable({
+        source: file,
+        threshold: 16,
+        chunkBytes: 16,
+        parallelism: 1,
+        signal: ac.signal,
+      }),
+    ).rejects.toMatchObject({
+      code: 'SESSION_FAILED',
+      message: expect.stringContaining('sess-0001'),
+    });
+  });
+
+  it('abandons the session and rethrows the original error when onSessionCreated throws', async () => {
+    const gw = makeFakeGateway({ chunkBytes: 16 });
+    const client = makeClient(gw.fetchMock);
+
+    const callbackError = new Error('caller persistence failed');
+    const file = new Uint8Array(40).fill(0x99);
+    await expect(
+      client.poe.uploadResumable({
+        source: file,
+        threshold: 16,
+        chunkBytes: 16,
+        onSessionCreated: () => {
+          throw callbackError;
+        },
+      }),
+    ).rejects.toBe(callbackError);
+
+    // The session was created, then abandoned (DELETE) — a throwing callback must
+    // not leak the freshly-created session. No chunk was PUT (the throw preempts
+    // the upload).
+    expect(gw.calls.create).toBe(1);
+    expect(gw.calls.put).toBe(0);
+    expect(gw.calls.abandon).toBe(1);
+  });
+
+  it('abandons the session and rethrows the original error when onProgress throws', async () => {
+    const gw = makeFakeGateway({ chunkBytes: 16 });
+    const client = makeClient(gw.fetchMock);
+
+    const callbackError = new Error('progress sink failed');
+    const file = new Uint8Array(40).fill(0xaa);
+    await expect(
+      client.poe.uploadResumable({
+        source: file,
+        threshold: 16,
+        chunkBytes: 16,
+        parallelism: 1,
+        onProgress: () => {
+          throw callbackError;
+        },
+      }),
+    ).rejects.toBe(callbackError);
+
+    // A throwing onProgress (fired after the first chunk lands) abandons the
+    // session rather than leaving it dangling — the catch is not gated on abort.
+    expect(gw.calls.create).toBe(1);
+    expect(gw.calls.abandon).toBe(1);
+  });
+
+  it('surfaces SESSION_FAILED naming the session id when a throwing callback then fails to abandon', async () => {
+    const gw = makeFakeGateway({ chunkBytes: 16 });
+    const original = gw.fetchMock.getMockImplementation()!;
+    gw.fetchMock.mockImplementation(async (url, init) => {
+      const path = new URL(typeof url === 'string' ? url : url.toString()).pathname;
+      const method = (init?.method ?? 'GET').toUpperCase();
+      // The abandon DELETE fails with a 500, so the leaked session must surface
+      // to the caller with its id — even when the trigger was a throwing callback.
+      if (path.match(/\/sessions\/([^/]+)$/) && method === 'DELETE') {
+        return problemResponse('internal-error', 500);
+      }
+      return original(url, init);
+    });
+    const client = makeClient(gw.fetchMock);
+
+    const file = new Uint8Array(40).fill(0xbb);
+    await expect(
+      client.poe.uploadResumable({
+        source: file,
+        threshold: 16,
+        chunkBytes: 16,
+        onSessionCreated: () => {
+          throw new Error('caller persistence failed');
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'SESSION_FAILED',
+      message: expect.stringContaining('sess-0001'),
+    });
+  });
+});
+
+describe('poe.abandonUploadSession', () => {
+  it('DELETEs the session and resolves on 204', async () => {
+    const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit): Promise<Response> => {
+      const path = new URL(typeof url === 'string' ? url : url.toString()).pathname;
+      const method = (init?.method ?? 'GET').toUpperCase();
+      expect(method).toBe('DELETE');
+      expect(path).toBe('/api/v1/poe/uploads/sessions/sess-xyz');
+      return new Response(null, { status: 204 });
+    });
+    await expect(
+      makeClient(fetchMock).poe.abandonUploadSession('sess-xyz'),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a 404/410 as already-gone (idempotent), not an error', async () => {
+    for (const status of [404, 410]) {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(problemResponse('not-found', status, 'no such upload session'));
+      await expect(
+        makeClient(fetchMock).poe.abandonUploadSession('sess-gone'),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  it('throws the typed error on a non-idempotent failure (e.g. 403)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(problemResponse('forbidden', 403, 'not your session'));
+    await expect(makeClient(fetchMock).poe.abandonUploadSession('sess-403')).rejects.toMatchObject({
+      httpStatus: 403,
+    });
   });
 });
