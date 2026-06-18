@@ -56,6 +56,11 @@ async function verifyCorpusRecord(
   return verifyTx({
     txHash: record.tx_hash,
     cardanoGatewayChain: useBlockfrost ? [] : ['https://api.koios.rest/api/v1'],
+    // Pin the Arweave chain to the single gateway the corpus stub serves, so
+    // resolution stays decoupled from the default gateway ROTATION (asserted
+    // independently by the ARWEAVE_GATEWAY_DEFAULTS unit test) and the audit
+    // trail is deterministic across SDK twins.
+    arweaveGatewayChain: ['https://arweave.net'],
     ...(useBlockfrost ? { blockfrostProjectId: 'corpus' } : {}),
     ...(decryption.length > 0 ? { decryption } : {}),
     denyHosts,

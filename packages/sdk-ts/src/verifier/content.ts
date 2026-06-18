@@ -39,9 +39,9 @@ import type { FetchOutbound } from './types';
 // fetches ipfs:// must configure its own chain, and one that does not is a
 // deployment that declines IPFS (URI_TARGET_FORBIDDEN at fetch time).
 export const ARWEAVE_GATEWAY_DEFAULTS: ReadonlyArray<string> = [
+  'https://turbo-gateway.com',
   'https://arweave.net',
-  'https://ar-io.net',
-  'https://g8way.io',
+  'https://permagate.io',
 ];
 
 const ARWEAVE_TXID_RE = /^[A-Za-z0-9_-]{43}$/;

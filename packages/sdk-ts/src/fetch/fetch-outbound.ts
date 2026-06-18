@@ -32,6 +32,12 @@ export interface FetchOutboundOptions {
   // verifier never trusts the producer — so a malicious gateway could otherwise
   // stream unbounded bytes into memory. Omit to use DEFAULT_OUTBOUND_MAX_BYTES.
   readonly maxBytes?: number;
+  // Deny-host list forwarded by `wrapFetchOutbound` so the transport can
+  // re-apply it to a same-domain redirect target (arweave purpose only). The
+  // wrapper validated the ORIGINAL url against this list before dispatch; the
+  // transport re-validates each redirect hop it chooses to follow so a 3xx can
+  // never pivot the fetch onto a denied host behind the wrapper's back.
+  readonly denyHosts?: ReadonlyArray<string>;
 }
 
 export interface FetchOutboundResult {
@@ -182,6 +188,55 @@ function canonicaliseHost(host: string): string {
   return host.replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '').toLowerCase();
 }
 
+// Maximum redirect hops the arweave-gateway content fetch will follow before
+// treating the gateway as failed. Arweave gateways 302 once
+// (`{gw}/{txid}` → sandbox subdomain); the small ceiling tolerates a gateway
+// that chains a couple of internal hops while bounding the work.
+const MAX_REDIRECT_HOPS = 3;
+
+// Decide whether a 3xx Location may be followed for the arweave content-fetch
+// purpose. Arweave gateways 302 `{gw}/{txid}` → `{base32}.{gw}/{txid}` (a
+// sandbox subdomain of the SAME registrable domain); following same-domain
+// redirects is REQUIRED to fetch content. Cross-domain redirects stay blocked
+// to prevent SSRF pivots (e.g. a 302 → 169.254.169.254 or → evil.com): the
+// SDK runs server-side (Node), so the browser is not a boundary and the
+// validation must live here in code.
+//
+// Every hop of a multi-hop chain is anchored against the ORIGINAL gateway host
+// — the host of the URL the fetch STARTED from — not the previous hop's host.
+// Anchoring on the previous hop would let the allowed host drift as the chain
+// is followed (`a.arweave.net` → `evil.com` would pass once the comparison
+// host had already drifted to `a.arweave.net`'s domain), and would also wrongly
+// refuse a legitimate sibling sandbox (`a.arweave.net` → `b.arweave.net`).
+// `originalGwHost` is canonicalised once by the caller before the follow-loop.
+//
+// Returns the absolute, same-domain, non-denied target URL to re-issue the GET
+// against, or `null` to fail this gateway.
+function resolveSameDomainRedirect(
+  fromUrl: string,
+  location: string | null,
+  originalGwHost: string,
+  denyHosts: ReadonlyArray<string>,
+): string | null {
+  if (location === null) return null;
+  let target: URL;
+  try {
+    target = new URL(location, fromUrl);
+  } catch {
+    return null;
+  }
+  // 1. The Location must resolve to an absolute https URL.
+  if (target.protocol !== 'https:') return null;
+  // 2. The Location host must equal the ORIGINAL gateway's host or be a
+  //    subdomain of it: `host === originalGwHost || host.endsWith("." + originalGwHost)`.
+  const host = canonicaliseHost(target.hostname);
+  if (host !== originalGwHost && !host.endsWith('.' + originalGwHost)) return null;
+  // 3. The redirect target must not be in the deny-host list — the same check
+  //    the wrapper applied to the original url, re-applied to the new target.
+  if (denyHosts.length > 0 && matchesDenyList(host, denyHosts)) return null;
+  return target.toString();
+}
+
 export function matchesDenyList(host: string, denyHosts: ReadonlyArray<string>): boolean {
   const h = canonicaliseHost(host);
   for (const raw of denyHosts) {
@@ -232,49 +287,109 @@ export const defaultFetchOutbound: FetchOutbound = async (url, opts) => {
   const maxBytes = opts.maxBytes ?? DEFAULT_OUTBOUND_MAX_BYTES;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-  const init: RequestInit = {
-    method: opts.method,
-    signal: controller.signal,
-    // Redirects are never followed — deny-host and protocol validation ran
-    // against the original URL only, so a 3xx from an allowed host could
-    // otherwise pivot the fetch to any target (e.g. `302 Location:
-    // http://127.0.0.1/…`) behind the verifier's back. Every target must be
-    // validated, so a redirect is a fetch failure; all SDKs behave
-    // identically. A readable 3xx flows through as a non-2xx status and the
-    // caller's attempt handling marks it failed, like a 5xx.
-    redirect: 'manual',
-  };
-  if (opts.headers) init.headers = { ...opts.headers };
-  if (opts.body !== undefined) init.body = opts.body;
   try {
-    // allow-raw-fetch: canonical defaultFetchOutbound — single egress point
-    const res = await fetch(url, init);
-
-    // Browser runtimes surface a refused redirect as an opaque response
-    // (type 'opaqueredirect', status 0) with no readable status or body;
-    // there is nothing to report from it, so it fails like a transport error.
-    if (res.type === 'opaqueredirect') {
-      throw new Error(`redirect refused (opaqueredirect): ${url} answered with a redirect`);
+    let currentUrl = url;
+    // Anchor every redirect hop against the host of the URL the fetch STARTED
+    // from, captured once here. As the chain is followed, `currentUrl` drifts
+    // onto the (validated) sandbox subdomains; the same-domain test must keep
+    // comparing against this fixed original host, never the per-hop host.
+    let originalGwHost: string | null;
+    try {
+      originalGwHost = canonicaliseHost(new URL(url).hostname);
+    } catch {
+      originalGwHost = null;
     }
+    for (let hop = 0; ; hop++) {
+      // The arweave content-fetch purpose follows same-domain sandbox
+      // redirects manually (see below); every other purpose keeps the
+      // refuse-all-redirects behaviour, surfacing a readable 3xx as a non-2xx
+      // status (like a 5xx) so the caller's attempt handling fails the
+      // gateway. The webhook purpose never reaches here — the wrapper rejects
+      // it up front so its bespoke SSRF guard runs instead.
+      const res = await issueRequest(currentUrl, opts, controller.signal);
 
-    // Fast path: a truthful Content-Length over the cap lets us bail before
-    // reading a single body byte. A lying/absent header is still caught by the
-    // streaming counter below — the header is an optimisation, not the guard.
-    const declared = res.headers.get('content-length');
-    if (declared !== null) {
-      const declaredLen = Number(declared);
-      if (Number.isFinite(declaredLen) && declaredLen > maxBytes) {
-        controller.abort();
-        throw new BodyTooLargeError(url, maxBytes);
+      // For the arweave purpose only, decide whether to follow a 3xx to a
+      // validated same-domain target. Arweave gateways 302
+      // `{gw}/{txid}` → `{base32}.{gw}/{txid}` (a sandbox subdomain of the
+      // SAME registrable domain); following same-domain redirects is REQUIRED
+      // to fetch content, while cross-domain redirects stay blocked to prevent
+      // SSRF pivots (e.g. a 302 → 169.254.169.254). The SDK runs server-side
+      // (Node), so the browser is not a boundary — the validation runs in code.
+      if (opts.purpose === 'arweave' && res.status >= 300 && res.status < 400) {
+        if (hop >= MAX_REDIRECT_HOPS) {
+          throw new Error(
+            `redirect limit exceeded (${MAX_REDIRECT_HOPS} hops): ${url} kept redirecting`,
+          );
+        }
+        const next =
+          originalGwHost === null
+            ? null
+            : resolveSameDomainRedirect(
+                currentUrl,
+                res.headers.get('location'),
+                originalGwHost,
+                opts.denyHosts ?? [],
+              );
+        if (next === null) {
+          // Not an absolute https same-domain non-denied target: treat this
+          // gateway as failed and let the caller move to the next gateway.
+          throw new Error(
+            `redirect refused: ${currentUrl} → ${res.headers.get('location') ?? '(no Location)'} is not a same-domain https target`,
+          );
+        }
+        // Drain/cancel the 3xx body so the socket can be reused, then re-issue.
+        await res.body?.cancel().catch(() => undefined);
+        currentUrl = next;
+        continue;
       }
-    }
 
-    const bytes = await readBodyCapped(res, url, maxBytes, controller);
-    return { status: res.status, bytes, durationMs: Date.now() - t0 };
+      // Browser runtimes surface a refused redirect as an opaque response
+      // (type 'opaqueredirect', status 0) with no readable status or body;
+      // there is nothing to report from it, so it fails like a transport error.
+      if (res.type === 'opaqueredirect') {
+        throw new Error(`redirect refused (opaqueredirect): ${url} answered with a redirect`);
+      }
+
+      // Fast path: a truthful Content-Length over the cap lets us bail before
+      // reading a single body byte. A lying/absent header is still caught by the
+      // streaming counter below — the header is an optimisation, not the guard.
+      const declared = res.headers.get('content-length');
+      if (declared !== null) {
+        const declaredLen = Number(declared);
+        if (Number.isFinite(declaredLen) && declaredLen > maxBytes) {
+          controller.abort();
+          throw new BodyTooLargeError(currentUrl, maxBytes);
+        }
+      }
+
+      const bytes = await readBodyCapped(res, currentUrl, maxBytes, controller);
+      return { status: res.status, bytes, durationMs: Date.now() - t0 };
+    }
   } finally {
     clearTimeout(timeout);
   }
 };
+
+// Issue one request with manual redirect handling. `redirect: 'manual'` means
+// a 3xx is returned verbatim — the transport, not the runtime, decides whether
+// to follow it (same-domain arweave sandbox redirects only; see
+// `defaultFetchOutbound`). The body/Content-Length guards run on the response
+// the caller ultimately consumes, not on intermediate 3xx hops.
+async function issueRequest(
+  url: string,
+  opts: FetchOutboundOptions,
+  signal: AbortSignal,
+): Promise<Response> {
+  const init: RequestInit = {
+    method: opts.method,
+    signal,
+    redirect: 'manual',
+  };
+  if (opts.headers) init.headers = { ...opts.headers };
+  if (opts.body !== undefined) init.body = opts.body;
+  // allow-raw-fetch: canonical defaultFetchOutbound — single egress point
+  return fetch(url, init);
+}
 
 // Stream the response body, aborting the underlying request the instant the
 // running byte count exceeds `maxBytes`. This is the actual OOM guard: a
@@ -406,6 +521,12 @@ export function wrapFetchOutbound(
       }
     }
 
+    // Forward the deny-host list to the transport so it can re-apply the same
+    // check to any same-domain redirect target it chooses to follow (arweave
+    // purpose). The wrapper already validated the original url above; the
+    // transport re-validates each redirect hop.
+    const innerOpts: FetchOutboundOptions = denyHosts.length > 0 ? { ...opts, denyHosts } : opts;
+
     // Retry loop. retries=0 → single attempt, return-or-rethrow original.
     let lastStatus: number | undefined;
     let lastError: Error | undefined;
@@ -413,7 +534,7 @@ export function wrapFetchOutbound(
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
       const t0 = Date.now();
       try {
-        const result = await inner(url, opts);
+        const result = await inner(url, innerOpts);
         audit.push({
           url,
           method: opts.method,

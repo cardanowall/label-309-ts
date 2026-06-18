@@ -542,7 +542,9 @@ describe('verifyTx — content integrity vs attribution vs availability', () => 
     expect(availability.map((i) => [i.code, i.path])).toEqual([
       ['CONTENT_FETCH_LIMIT_EXCEEDED', ['items', 0]],
     ]);
-    expect(storageUrls).toEqual([`https://arweave.net/${ARWEAVE_TXID_1}`]);
+    // The first default Arweave gateway is tried; a ceiling abort ends the
+    // claim there, so the sibling URI and remaining gateways are never reached.
+    expect(storageUrls).toEqual([`https://turbo-gateway.com/${ARWEAVE_TXID_1}`]);
   });
 });
 
@@ -1128,15 +1130,15 @@ describe('unsupported signature algorithms — exactly one SIGNATURE_UNSUPPORTED
   });
 });
 
-describe('content-gateway redirects are never followed', () => {
-  it('302 toward a deny-listed target is a failed attempt, not a followed hop', async () => {
+describe('content-gateway redirects are followed only within the same domain', () => {
+  it('302 toward a deny-listed cross-domain target is refused, not a followed hop', async () => {
     const fix = buildFixture({ itemUris: [`ar://${ARWEAVE_TXID_1}`] });
     // The run uses the real default transport with the platform fetch stubbed:
     // the gateway answers a redirect pointing INTO the deny-listed loopback.
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(
-        new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/steal' } }),
+        new Response(null, { status: 302, headers: { location: 'https://127.0.0.1/steal' } }),
       );
     try {
       const r = await verifyResolved({
@@ -1147,12 +1149,14 @@ describe('content-gateway redirects are never followed', () => {
         arweaveGatewayChain: ['https://gw.test'],
         denyHosts: ['localhost', '127.0.0.1'],
       });
-      // The redirect target was never contacted: one outbound call, to the
-      // gateway only.
+      // The redirect target is cross-domain (and deny-listed), so the transport
+      // refuses to follow it: one outbound call, to the gateway only — the
+      // loopback target is never contacted.
       expect(fetchSpy).toHaveBeenCalledOnce();
       expect(String(fetchSpy.mock.calls[0]![0])).toBe(`https://gw.test/${ARWEAVE_TXID_1}`);
-      // The attempt is recorded as failed with its real 3xx status…
-      expect(r.auditTrail).toEqual([expect.objectContaining({ status: 302 })]);
+      // The refusal is raised inside the transport (no status returned), so the
+      // attempt is recorded with a null status…
+      expect(r.auditTrail).toEqual([expect.objectContaining({ status: null })]);
       // …and classified as availability: the deny-listed host was never
       // reached, so no service-independence violation is raised.
       expect(r.issues.some((i) => i.code === 'SERVICE_INDEPENDENCE_VIOLATION')).toBe(false);
@@ -1162,6 +1166,41 @@ describe('content-gateway redirects are never followed', () => {
       );
       expect(r.items).toEqual([{ contentCheck: 'not_checked' }]);
       expect(r.verdict).toBe('unverifiable');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('302 toward a same-domain sandbox subdomain is followed to the final 200 body', async () => {
+    const content = new TextEncoder().encode('arweave sandbox content');
+    const fix = buildFixture({ itemContent: content, itemUris: [`ar://${ARWEAVE_TXID_1}`] });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: string) => {
+      const u = typeof input === 'string' ? input : (input as Request).url;
+      if (u === `https://gw.test/${ARWEAVE_TXID_1}`) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: `https://base32sandbox.gw.test/${ARWEAVE_TXID_1}` },
+        });
+      }
+      if (u === `https://base32sandbox.gw.test/${ARWEAVE_TXID_1}`) {
+        return new Response(content, { status: 200 });
+      }
+      throw new Error(`unexpected url ${u}`);
+    }) as typeof fetch);
+    try {
+      const r = await verifyResolved({
+        txHash: fix.txHash,
+        metadataCbor: encodePoeRecord(fix.record),
+        confirmationDepth: 50,
+        blockTime: 1700000123,
+        arweaveGatewayChain: ['https://gw.test'],
+        denyHosts: ['localhost', '127.0.0.1'],
+      });
+      // Two outbound calls: the 302 and the followed same-domain sandbox GET.
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      // The content is fetched from the sandbox subdomain and verified.
+      expect(r.items).toEqual([{ contentCheck: 'checked' }]);
+      expect(r.verdict).toBe('valid');
     } finally {
       fetchSpy.mockRestore();
     }

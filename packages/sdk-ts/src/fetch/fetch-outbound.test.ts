@@ -505,18 +505,187 @@ describe('defaultFetchOutbound', () => {
     expect(Array.from(result.bytes)).toEqual([10, 20, 30, 40]);
   });
 
-  it('never follows redirects: a 302 surfaces as a non-2xx result from a single fetch', async () => {
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(
-        new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/internal' } }),
-      );
-    const result = await defaultFetchOutbound('https://gw.example/blob', {
+  // Arweave gateways 302 `{gw}/{txid}` → `{base32}.{gw}/{txid}` (a sandbox
+  // subdomain of the SAME registrable domain). The arweave content-fetch
+  // purpose follows that redirect — but ONLY when the target is an absolute
+  // https URL on the same domain (or a subdomain) and not deny-listed.
+  it('arweave purpose follows a same-domain sandbox 302 to the final 200 body', async () => {
+    const sandboxBody = new Uint8Array([7, 8, 9]);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: string) => {
+      const u = typeof input === 'string' ? input : (input as Request).url;
+      if (u === 'https://arweave.net/abc') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://base32hash.arweave.net/abc' },
+        });
+      }
+      if (u === 'https://base32hash.arweave.net/abc') {
+        return new Response(sandboxBody, { status: 200 });
+      }
+      throw new Error(`unexpected url ${u}`);
+    }) as typeof fetch);
+    const result = await defaultFetchOutbound('https://arweave.net/abc', {
       method: 'GET',
       purpose: 'arweave',
     });
-    // Exactly one request: the Location target is never contacted, because
-    // the redirect policy is manual and the 3xx is returned as-is.
+    // Two requests: the 302 and the followed sandbox GET; the final 200 body
+    // is returned. `redirect: 'manual'` on every hop (the transport, not the
+    // runtime, chose to follow).
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect((fetchSpy.mock.calls[0]![1] as RequestInit).redirect).toBe('manual');
+    expect(result.status).toBe(200);
+    expect(Array.from(result.bytes)).toEqual([7, 8, 9]);
+  });
+
+  it('arweave purpose does NOT follow a cross-domain 302 (fails this gateway)', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://evil.com/steal' } }),
+      );
+    await expect(
+      defaultFetchOutbound('https://arweave.net/abc', { method: 'GET', purpose: 'arweave' }),
+    ).rejects.toThrow(/redirect refused/);
+    // The cross-domain target is never contacted.
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it('arweave purpose does NOT follow a 302 → loopback metadata IP (SSRF pivot blocked)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://169.254.169.254/latest/meta-data' },
+      }),
+    );
+    await expect(
+      defaultFetchOutbound('https://arweave.net/abc', { method: 'GET', purpose: 'arweave' }),
+    ).rejects.toThrow(/redirect refused/);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it('arweave purpose rejects a same-domain redirect whose target is deny-listed', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://sandbox.arweave.net/abc' },
+      }),
+    );
+    await expect(
+      defaultFetchOutbound('https://arweave.net/abc', {
+        method: 'GET',
+        purpose: 'arweave',
+        // The transport re-applies the deny-host check to the redirect target:
+        // the original host (arweave.net) is allowed, but the sandbox subdomain
+        // it redirects to is deny-listed, so the follow is refused.
+        denyHosts: ['*.arweave.net'],
+      }),
+    ).rejects.toThrow(/redirect refused/);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it('arweave purpose fails the gateway once the redirect hop cap (3) is exceeded', async () => {
+    // A gateway that keeps redirecting deeper into the same domain — each hop
+    // is a subdomain of the host it came from, so every hop passes the
+    // same-domain check and only the hop cap can stop the loop.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: string) => {
+      const u = typeof input === 'string' ? input : (input as Request).url;
+      const host = new URL(u).hostname;
+      return new Response(null, {
+        status: 302,
+        headers: { location: `https://x.${host}/abc` },
+      });
+    }) as typeof fetch);
+    await expect(
+      defaultFetchOutbound('https://arweave.net/abc', { method: 'GET', purpose: 'arweave' }),
+    ).rejects.toThrow(/redirect limit exceeded/);
+    // Initial request + 3 followed hops = 4 fetches, then the cap trips.
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  // A multi-hop chain must be validated against the host of the URL the fetch
+  // STARTED from, not against the previous hop's (drifting) host. This matches
+  // the Rust twin's `gateway_redirect_allowed(origin, …)`: `origin` is fixed
+  // for the whole chain.
+  it('arweave purpose follows a multi-hop chain whose every hop is a subdomain of the ORIGINAL host', async () => {
+    // arweave.net → a.arweave.net → b.arweave.net: each hop is a subdomain of
+    // the ORIGINAL arweave.net, so the chain is followed to the 200 body.
+    // b.arweave.net is NOT a subdomain of a.arweave.net (the previous hop), so
+    // per-hop anchoring would have wrongly refused the final hop.
+    const payload = new Uint8Array([4, 2]);
+    const visited: string[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: string) => {
+      const u = typeof input === 'string' ? input : (input as Request).url;
+      const host = new URL(u).hostname;
+      visited.push(host);
+      if (host === 'arweave.net') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://a.arweave.net/abc' },
+        });
+      }
+      if (host === 'a.arweave.net') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://b.arweave.net/abc' },
+        });
+      }
+      if (host === 'b.arweave.net') {
+        return new Response(payload, { status: 200 });
+      }
+      throw new Error(`unexpected url ${u}`);
+    }) as typeof fetch);
+    const result = await defaultFetchOutbound('https://arweave.net/abc', {
+      method: 'GET',
+      purpose: 'arweave',
+    });
+    expect(result.status).toBe(200);
+    expect(Array.from(result.bytes)).toEqual([4, 2]);
+    expect(visited).toEqual(['arweave.net', 'a.arweave.net', 'b.arweave.net']);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('arweave purpose refuses a multi-hop chain that drifts off the ORIGINAL domain', async () => {
+    // arweave.net → a.arweave.net → c.other.com: the final hop leaves the
+    // ORIGINAL registrable domain and is refused; the cross-domain target is
+    // never contacted.
+    const visited: string[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: string) => {
+      const u = typeof input === 'string' ? input : (input as Request).url;
+      const host = new URL(u).hostname;
+      visited.push(host);
+      if (host === 'arweave.net') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://a.arweave.net/abc' },
+        });
+      }
+      if (host === 'a.arweave.net') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://c.other.com/steal' },
+        });
+      }
+      throw new Error(`unexpected url ${u}`);
+    }) as typeof fetch);
+    await expect(
+      defaultFetchOutbound('https://arweave.net/abc', { method: 'GET', purpose: 'arweave' }),
+    ).rejects.toThrow(/redirect refused/);
+    expect(visited).toEqual(['arweave.net', 'a.arweave.net']);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('non-arweave purpose never follows a 3xx: it surfaces as a non-2xx status', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://elsewhere.example/' } }),
+      );
+    const result = await defaultFetchOutbound('https://gw.example/blob', {
+      method: 'GET',
+      purpose: 'https',
+    });
+    // Exactly one request: a non-storage purpose keeps the refuse-all-redirects
+    // behaviour, returning the readable 3xx verbatim like a 5xx.
     expect(fetchSpy).toHaveBeenCalledOnce();
     expect((fetchSpy.mock.calls[0]![1] as RequestInit).redirect).toBe('manual');
     expect(result.status).toBe(302);
@@ -531,17 +700,17 @@ describe('defaultFetchOutbound', () => {
     } as unknown as Response;
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(opaque);
     await expect(
-      defaultFetchOutbound('https://gw.example/blob', { method: 'GET', purpose: 'arweave' }),
+      defaultFetchOutbound('https://gw.example/blob', { method: 'GET', purpose: 'https' }),
     ).rejects.toThrow(/opaqueredirect/);
   });
 
-  it('audit trail: readable 3xx records its real status, opaqueredirect records null', async () => {
+  it('audit trail: a non-arweave readable 3xx records its real status, opaqueredirect records null', async () => {
     const audit: HttpCallRecord[] = [];
     const wrapped = wrapFetchOutbound(defaultFetchOutbound, audit);
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(null, { status: 307, headers: { location: 'https://elsewhere.example/' } }),
     );
-    const r = await wrapped('https://gw.example/a', { method: 'GET', purpose: 'arweave' });
+    const r = await wrapped('https://gw.example/a', { method: 'GET', purpose: 'https' });
     expect(r.status).toBe(307);
 
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
@@ -551,7 +720,7 @@ describe('defaultFetchOutbound', () => {
       body: null,
     } as unknown as Response);
     await expect(
-      wrapped('https://gw.example/b', { method: 'GET', purpose: 'arweave' }),
+      wrapped('https://gw.example/b', { method: 'GET', purpose: 'https' }),
     ).rejects.toThrow(/opaqueredirect/);
 
     expect(audit.map((a) => a.status)).toEqual([307, null]);

@@ -59,8 +59,12 @@ export function stubFetchFromCorpusRecord(record: MainnetCorpusRecord): FetchOut
       return jsonResponse(captures.blockfrost_tx);
     }
     // Captured Arweave content (item bytes, leaves-lists, sealed ciphertext).
+    // Match on the content address (txid) regardless of which gateway host the
+    // verifier reached for it: the corpus content is gateway-agnostic, so the
+    // stub serves it from whatever the verifier's first default Arweave gateway
+    // happens to be rather than a single hard-coded host.
     for (const [arTxId, hex] of Object.entries(arweave)) {
-      if (url === `https://arweave.net/${arTxId}`) {
+      if (url.endsWith(`/${arTxId}`)) {
         return bytesResponse(hexToBytes(hex));
       }
     }

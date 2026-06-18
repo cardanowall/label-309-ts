@@ -76,6 +76,13 @@ async function verifyCorpusRecord(
   return verifyTx({
     txHash: record.tx_hash,
     cardanoGatewayChain: useBlockfrost ? [] : ['https://api.koios.rest/api/v1'],
+    // Pin the Arweave chain to the single gateway the corpus stub serves, so
+    // this report-parity test stays decoupled from the default gateway
+    // ROTATION (whose membership/order is asserted independently by the
+    // ARWEAVE_GATEWAY_DEFAULTS unit test). Without the pin, the verifier would
+    // try the default chain's first gateway, get an unserved-host failure from
+    // the stub, and record an extra audit row that diverges from the fixture.
+    arweaveGatewayChain: ['https://arweave.net'],
     ...(useBlockfrost ? { blockfrostProjectId: 'corpus' } : {}),
     ...(decryption.length > 0 ? { decryption } : {}),
     denyHosts: CONFORMANCE_DENY,
