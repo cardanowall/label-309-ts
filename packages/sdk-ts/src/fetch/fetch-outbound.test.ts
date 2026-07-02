@@ -759,11 +759,11 @@ describe('fetchOutbound (high-level)', () => {
     expect(audit).toHaveLength(1);
   });
 
-  it('rejects purpose=webhook with a guidance message; audit row is still recorded', async () => {
+  it('rejects purpose=webhook (no SSRF guard in the generic wrapper); audit row is still recorded', async () => {
     const audit: HttpCallRecord[] = [];
     await expect(
       fetchOutbound('https://example.com/', { method: 'POST', purpose: 'webhook' }, audit),
-    ).rejects.toThrow(/fetchWebhook/);
+    ).rejects.toThrow(/DNS-pinning SSRF guard/);
     expect(audit).toHaveLength(1);
     expect(audit[0]?.purpose).toBe('webhook');
     expect(audit[0]?.status).toBeNull();

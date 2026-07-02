@@ -15,10 +15,12 @@ export const DENY_HOSTS_DEFAULT: ReadonlyArray<string> = ['localhost', '127.0.0.
 // `{cardano, arweave, ipfs}` (the three v1 gateway-chain purposes).
 // `https` is a transitional legacy tag for non-storage HTTPS
 // auxiliaries; new code SHOULD pick one of the three normative purposes.
-// `webhook` is the user-supplied-URL purpose: it triggers the SSRF guard
-// (DNS resolution + IP range check + connection pinning + redirect-chain
-// re-checking + body-size cap), and MUST be used for any fetch where the
-// target URL came from end-user input.
+// `webhook` tags a fetch whose target URL came from end-user input. Safe
+// egress to such a URL needs a DNS-pinning SSRF guard — resolve the host,
+// range-check every A/AAAA record against the private/reserved blocklist,
+// and pin the TCP connection to the checked IP — which this generic wrapper
+// deliberately does not implement, so the purpose is rejected up front
+// rather than letting a user-supplied URL ride the ordinary fetch path.
 export type HttpPurpose = 'cardano' | 'arweave' | 'ipfs' | 'https' | 'webhook';
 export type HttpMethod = 'GET' | 'POST';
 
@@ -305,7 +307,7 @@ export const defaultFetchOutbound: FetchOutbound = async (url, opts) => {
       // refuse-all-redirects behaviour, surfacing a readable 3xx as a non-2xx
       // status (like a 5xx) so the caller's attempt handling fails the
       // gateway. The webhook purpose never reaches here — the wrapper rejects
-      // it up front so its bespoke SSRF guard runs instead.
+      // it before dispatch (see `wrapFetchOutbound`).
       const res = await issueRequest(currentUrl, opts, controller.signal);
 
       // For the arweave purpose only, decide whether to follow a 3xx to a
@@ -460,10 +462,13 @@ export function wrapFetchOutbound(
   const retryableStatuses = normConfig.retryableStatuses ?? DEFAULT_RETRYABLE_STATUSES;
 
   return async (url, opts) => {
-    // The `webhook` purpose has bespoke requirements (DNS pinning,
-    // per-hop redirect re-checking, body-size cap) that the generic
-    // wrapper cannot satisfy. Force callers to use `fetchWebhook`
-    // instead of silently accepting the call here.
+    // Safe egress to a user-supplied (webhook-style) URL needs a bespoke
+    // DNS-pinning SSRF guard: resolve the host, range-check every A/AAAA
+    // record against the private/reserved blocklist, and pin the TCP
+    // connection to the checked IP so a rebinding resolver cannot swap the
+    // target after the check. This generic wrapper deliberately provides
+    // none of that, so it refuses the purpose instead of silently treating
+    // the URL as an ordinary fetch.
     if (opts.purpose === 'webhook') {
       audit.push({
         url,
@@ -474,7 +479,7 @@ export function wrapFetchOutbound(
         purpose: opts.purpose,
       });
       throw new Error(
-        `webhook purpose must be sent via fetchWebhook, not fetchOutbound (url=${url})`,
+        `webhook purpose rejected: user-supplied URLs require a DNS-pinning SSRF guard, which the generic fetchOutbound deliberately does not provide (url=${url})`,
       );
     }
 

@@ -9,6 +9,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 > release. Pre-1.0 versions do not carry the stability guarantees of
 > [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-07-02
+
+### Changed
+
+- `sdk-ts`: the `webhook` purpose rejection in `/fetch` now states the actual requirement. The error message and comments explain that a user-supplied URL needs a DNS-pinning SSRF guard, which this package deliberately does not provide, instead of pointing at a `fetchWebhook` function that does not exist in the published package. Behavior, error handling, and types are unchanged.
+- `sdk-ts`: the README's `/fetch` export list is corrected; the package never exported `assertWebhookUrlSafe`.
+- `crypto-core` and `poe-standard`: version alignment with the coordinated 0.8.0 release; no functional changes.
+
 ## [0.7.1] - 2026-06-18
 
 ### Fixed

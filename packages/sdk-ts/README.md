@@ -176,7 +176,7 @@ Everything is reachable from the package root; submodule entry points (`/verifie
 - From `@cardanowall/poe-standard`: `validatePoeRecord`, `encodePoeRecord`, `encodeRecordBodyForSigning`, the error-code catalogues (`STRUCTURAL_ERROR_CODES`, `VERIFIER_ERROR_CODES`, `ERROR_CODES`), `severityOf`, `PoeRecordSchema`.
 - From `@cardanowall/crypto-core`: `eciesSealedPoeWrap` / `eciesSealedPoeUnwrap` (sealed PoE), `hash.*` (digests), `merkle.*` (`merkleSha2256Root`, `merkleSha2256InclusionProof`, `merkleSha2256VerifyInclusion`, leaves-list codecs).
 
-**Egress** (`/fetch`) — the verifier's single network egress point: `fetchOutbound`, `wrapFetchOutbound`, the deny-host guard (`DENY_HOSTS_DEFAULT`, `DenyHostError`), `BodyTooLargeError`, and the SSRF guard (`assertWebhookUrlSafe`). Inject your own `fetchOutbound` to fully control where the verifier may reach.
+**Egress** (`/fetch`) — the verifier's single network egress point: `fetchOutbound`, `wrapFetchOutbound`, the deny-host guard (`DENY_HOSTS_DEFAULT`, `DenyHostError`), and `BodyTooLargeError`. Inject your own `fetchOutbound` to fully control where the verifier may reach. The `webhook` purpose (a fetch whose target URL came from end-user input) is rejected by design: safe webhook egress needs a DNS-pinning SSRF guard, which this package does not provide.
 
 See the package source for the exhaustive list.
 
