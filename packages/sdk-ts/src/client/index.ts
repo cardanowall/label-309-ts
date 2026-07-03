@@ -6,6 +6,8 @@ export { PoeNamespace } from './poe';
 export { RecordsNamespace } from './records';
 export { PublishError } from './publish';
 export { PartialUploadError } from './partial-upload-error';
+export { PoeFailedError } from './poe-failed-error';
+export { PoeWaitTimeoutError } from './poe-wait-timeout-error';
 export {
   ResumableUploadError,
   DEFAULT_RESUMABLE_THRESHOLD_BYTES,
@@ -49,6 +51,9 @@ export type {
   FetchImpl,
   PoeItemResponse,
   PoeStatus,
+  PoeStatusSnapshot,
+  PoeWaitOptions,
+  PoeWaitTarget,
   PublishBatchEntry,
   PublishBatchFailureEntry,
   PublishBatchFailureError,

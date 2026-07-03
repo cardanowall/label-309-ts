@@ -1,6 +1,6 @@
 {
   "name": "@cardanowall/sdk-ts",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "type": "module",
   "description": "CardanoWall TypeScript SDK — standalone Label 309 verifier + envelope helpers + HTTP client (browser-safe).",
   "license": "Apache-2.0",
@@ -69,6 +69,12 @@
       "development": "./src/merkle/index.ts",
       "import": "./dist/merkle/index.js",
       "require": "./dist/merkle/index.cjs"
+    },
+    "./estimate": {
+      "types": "./dist/estimate/index.d.ts",
+      "development": "./src/estimate/index.ts",
+      "import": "./dist/estimate/index.js",
+      "require": "./dist/estimate/index.cjs"
     },
     "./certificate": {
       "types": "./dist/certificate/index.d.ts",

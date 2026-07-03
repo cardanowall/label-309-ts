@@ -8,6 +8,7 @@ export default defineConfig({
     'client/index': 'src/client/index.ts',
     'ids/index': 'src/ids/index.ts',
     'merkle/index': 'src/merkle/index.ts',
+    'estimate/index': 'src/estimate/index.ts',
     'hash/index': 'src/hash/index.ts',
     'certificate/index': 'src/certificate/index.ts',
     'identity/index': 'src/identity/index.ts',

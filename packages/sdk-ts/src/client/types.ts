@@ -460,6 +460,52 @@ export type PoeStatus =
   | 'permanent_failure'
   | 'failed'
   | (string & {});
+
+// =============================================================================
+// GET /poe/events/{poe_id} — live status stream (poe.wait)
+// =============================================================================
+//
+// The gateway streams a record's lifecycle over Server-Sent Events: an initial
+// `state` event with the full projected snapshot, then one event per change
+// carrying the same snapshot shape. `poe.wait()` follows the stream (with
+// resume-on-reconnect) until a requested target or a terminal state is
+// reached.
+
+/**
+ * Lifecycle milestone `poe.wait()` resolves at. `'submitted'` is satisfied
+ * once the transaction is on the wire (status `confirming` — or `confirmed`,
+ * which implies it); `'confirmed'` requires the confirmed status itself.
+ */
+export type PoeWaitTarget = 'submitted' | 'confirmed';
+
+/**
+ * A record's projected status snapshot as carried by the event stream. The
+ * `status` is normalized to the wire lifecycle: the raw engine statuses
+ * `submitted` / `permanent_failure` surface as `confirming` / `failed`.
+ */
+export interface PoeStatusSnapshot {
+  /** Wire-format prefixed id (`poe_<26-char-crockford-base32>`). */
+  readonly id: string;
+  readonly status: PoeStatus;
+  readonly tx_hash: string | null;
+  readonly block_height: number | null;
+  readonly block_time: string | null;
+  readonly num_confirmations: number;
+  readonly request_id: string | null;
+}
+
+export interface PoeWaitOptions {
+  /** Milestone to resolve at (see {@link PoeWaitTarget}). */
+  readonly target: PoeWaitTarget;
+  /**
+   * Overall deadline in milliseconds. When it elapses first the wait rejects
+   * with `PoeWaitTimeoutError` carrying the last snapshot seen. Omit to wait
+   * without a deadline.
+   */
+  readonly timeoutMs?: number;
+  /** Abort signal; aborting rejects the wait and closes the stream. */
+  readonly signal?: AbortSignal;
+}
 export type ConformanceProfile = 'core' | 'signed' | 'sealed' | 'recipient-sealed';
 
 export interface PoeItemResponse {
@@ -780,6 +826,13 @@ export interface PublishSealedInput {
   readonly kem?: 'x25519' | 'mlkem768x25519';
   readonly signer?: Signer;
   readonly idempotencyKey?: string;
+  /**
+   * Requested chunk size for the resumable-session path taken when the
+   * ciphertext exceeds the single-shot threshold. The server clamps the value
+   * to its `max_chunk_bytes` ceiling and its echo is authoritative; smaller
+   * blobs upload single-shot and ignore this.
+   */
+  readonly chunkBytes?: number;
 }
 
 export interface PublishMerkleInput {
@@ -797,6 +850,13 @@ export interface PublishMerkleInput {
   readonly hashAlg?: 'sha2-256';
   readonly signer?: Signer;
   readonly idempotencyKey?: string;
+  /**
+   * Requested chunk size for the resumable-session path taken when the
+   * leaves-list blob exceeds the single-shot threshold. The server clamps the
+   * value to its `max_chunk_bytes` ceiling and its echo is authoritative;
+   * smaller blobs upload single-shot and ignore this.
+   */
+  readonly chunkBytes?: number;
 }
 
 export interface PublishMerkleResponse {

@@ -17,6 +17,7 @@
 import { bytesToHex } from '../hex';
 import { readJson, throwIfNotOk } from './http-helpers';
 import { PartialUploadError } from './partial-upload-error';
+import { waitForPoe } from './poe-events';
 import {
   publishContent as publishContentImpl,
   publishMerkle as publishMerkleImpl,
@@ -31,6 +32,8 @@ import {
 } from './resumable-upload';
 import type {
   FetchImpl,
+  PoeStatusSnapshot,
+  PoeWaitOptions,
   PublishBatchInput,
   PublishBatchResponse,
   PublishContentInput,
@@ -287,6 +290,29 @@ export class PoeNamespace {
     });
     await throwIfNotOk(response);
     return (await readJson(response)) as PublishBatchResponse;
+  }
+
+  /**
+   * Wait for a published record to reach a lifecycle milestone by following
+   * the gateway's live status stream (`GET /poe/events/{poe_id}`,
+   * Server-Sent Events). Pass the `id` a publish call returned.
+   *
+   * Resolves with the record's snapshot once `options.target` is reached:
+   * `'submitted'` resolves as soon as the transaction is on the wire
+   * (status `confirming`, or `confirmed` which implies it); `'confirmed'`
+   * resolves at the confirmed status. A record that reaches the terminal
+   * `failed` status rejects with `PoeFailedError` (the snapshot rides on the
+   * error); an elapsed `timeoutMs` rejects with `PoeWaitTimeoutError`
+   * carrying the last snapshot seen.
+   *
+   * The stream is followed resiliently: dropped connections reconnect with
+   * backoff and resume from the last event id, so no status change is missed
+   * across a reconnect. Statuses are normalized to the wire lifecycle (the
+   * raw engine statuses `submitted` / `permanent_failure` surface as
+   * `confirming` / `failed`).
+   */
+  async wait(poeId: string, options: PoeWaitOptions): Promise<PoeStatusSnapshot> {
+    return waitForPoe(this.config, poeId, options);
   }
 
   /**

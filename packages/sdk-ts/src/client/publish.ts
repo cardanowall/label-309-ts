@@ -278,6 +278,7 @@ async function uploadBlob(
   config: ResolvedPublishConfig,
   bytes: Uint8Array,
   idempotencyKey: string | undefined,
+  chunkBytes: number | undefined,
 ): Promise<string> {
   const target: StorageTarget = STORAGE_TARGET_ARWEAVE;
   if (bytes.byteLength <= DEFAULT_RESUMABLE_THRESHOLD_BYTES) {
@@ -292,6 +293,7 @@ async function uploadBlob(
     target,
     source: bytes,
     ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+    ...(chunkBytes !== undefined ? { chunkBytes } : {}),
   });
   return result.uri;
 }
@@ -426,7 +428,7 @@ export async function publishSealed(
   });
 
   // Upload the ciphertext to Arweave (resumable for large ciphertexts).
-  const uri = await uploadBlob(config, sealed.ciphertext, input.idempotencyKey);
+  const uri = await uploadBlob(config, sealed.ciphertext, input.idempotencyKey, input.chunkBytes);
 
   // Build the sealed record: one item with the plaintext-bind hash, the
   // `ar://<tx>` URI of the ciphertext, and the discriminated envelope shape.
@@ -507,7 +509,7 @@ export async function publishMerkle(
   const leavesListCbor = encodeLeavesList({ leaves, root });
 
   // Upload the leaves-list to Arweave (resumable for large leaves-lists).
-  const uri = await uploadBlob(config, leavesListCbor, input.idempotencyKey);
+  const uri = await uploadBlob(config, leavesListCbor, input.idempotencyKey, input.chunkBytes);
 
   // Build the on-chain record with the resulting `ar://` URI.
   const merkleEntry: MerkleCommit = {

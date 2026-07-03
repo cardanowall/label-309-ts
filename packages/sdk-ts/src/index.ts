@@ -12,6 +12,7 @@ export * from './ids/index';
 export * as merkle from './merkle/index';
 export * as hash from './hash/index';
 export * as certificate from './certificate/index';
+export * as estimate from './estimate/index';
 
 export {
   validatePoeRecord,

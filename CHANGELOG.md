@@ -9,6 +9,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 > release. Pre-1.0 versions do not carry the stability guarantees of
 > [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-07-03
+
+### Added
+
+- `sdk-ts`: `client.poe.wait(poeId, { target, timeoutMs, signal })` — follows the gateway's `GET /poe/events/{poe_id}` SSE stream over the injected `fetch` until the record reaches the requested state. Spec-correct SSE parsing (buffered `id` commits, 64 KiB line / 256 KiB event caps), reconnect backoff with `last-event-id` resume, `Retry-After` on 429, and status normalization; a failed record rejects with `PoeFailedError`, a deadline rejects with `PoeWaitTimeoutError` carrying the last snapshot.
+- `sdk-ts`: `estimate` module (`@cardanowall/sdk-ts/estimate`) — exact upper-bound record-size arithmetic for item, Merkle, and sealed record shapes, for quoting before the final record bytes exist. Strings are charged at UTF-8 byte length, the accumulation is precision-safe on absurd inputs, and the arithmetic is pinned to the same cross-SDK parity constants as the Python and Rust implementations.
+- `sdk-ts`: `chunkBytes` option on `publishSealed` / `publishMerkle`, forwarded to the resumable upload session.
+
+### Changed
+
+- `crypto-core` and `poe-standard`: version alignment with the coordinated 0.9.0 release; no functional changes.
+
 ## [0.8.0] - 2026-07-02
 
 ### Changed
