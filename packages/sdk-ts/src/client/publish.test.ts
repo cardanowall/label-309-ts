@@ -1,17 +1,19 @@
 // Unit tests for the high-level publishContent() / publishPrehashed() /
-// publishSealed() / publishMerkle() helpers — assert canonical record shape,
-// signer integration, sealed-envelope construction, Merkle root binding,
-// partial-upload handling, and input-validation boundaries.
+// publishMerkle() helpers — assert canonical record shape, signer
+// integration, Merkle root binding, the merkle flow's internal quote /
+// price cap / deterministic upload key, partial-upload handling, and
+// input-validation boundaries. The sealed flow is covered in sealed.test.ts.
 
 import { describe, expect, it, vi } from 'vitest';
 
 import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js';
-import { eciesSealedPoeUnwrap, merkleSha2256Root } from '@cardanowall/crypto-core';
+import { merkleSha2256Root } from '@cardanowall/crypto-core';
+import { decodeLeavesList } from '@cardanowall/crypto-core/merkle';
 import { getPublicKeyEd25519, signEd25519 } from '@cardanowall/crypto-core/sig';
-import { mlkem768x25519Keygen, x25519PublicKey } from '@cardanowall/crypto-core/kem';
 import { validatePoeRecord } from '@cardanowall/poe-standard';
 
 import { Label309Client } from './label-309-client';
+import { MaxUsdExceededError } from './max-usd-exceeded-error';
 import { PartialUploadError } from './partial-upload-error';
 import { PublishError } from './publish';
 import type { Signer } from './types';
@@ -173,198 +175,20 @@ describe('PoeNamespace.publishContent — hash-only happy path', () => {
   });
 });
 
-describe('PoeNamespace.publishSealed — encrypt + uploads + publish', () => {
-  it('encrypts to x25519 recipients, uploads ciphertext to arweave, posts record with ar:// URI', async () => {
-    const recipientSecret = new Uint8Array(32).fill(0x11);
-    const recipientPub = x25519PublicKey({ secretKey: recipientSecret });
-    const arUri = `ar://${'C'.repeat(43)}`;
+describe('PoeNamespace.publishMerkle — internal quote + uploads + publish', () => {
+  const QUOTE_BODY = {
+    quote_id: QUOTE_ID,
+    amount: '42',
+    currency: 'USD',
+    expires_at: '2100-01-01T00:00:00Z',
+  };
 
-    let capturedCiphertext: Uint8Array | undefined;
-    const fetchMock = vi
-      .fn()
-      // First call: /uploads (multipart)
-      .mockImplementationOnce(async (_url: string, init: RequestInit) => {
-        const form = (init as { body: FormData }).body;
-        expect(form.get('target')).toBe('arweave');
-        const blob = form.get('file_0') as Blob;
-        capturedCiphertext = new Uint8Array(await blob.arrayBuffer());
-        return jsonResponse(makeUploadsResponse(arUri), 200);
-      })
-      // Second call: /publish (JSON)
-      .mockResolvedValueOnce(jsonResponse(PUBLISH_BODY, 202));
+  async function uploadedLeavesList(fetchMock: ReturnType<typeof vi.fn>): Promise<Uint8Array> {
+    const form = (fetchMock.mock.calls[1]![1] as { body: FormData }).body;
+    return new Uint8Array(await (form.get('file_0') as Blob).arrayBuffer());
+  }
 
-    const client = makeClient(fetchMock);
-    const signer = makeInMemorySigner();
-    const out = await client.poe.publishSealed({
-      content: 'top-secret',
-      quoteId: QUOTE_ID,
-      recipients: [recipientPub],
-      // Explicit classical opt-out (default is now the hybrid KEM).
-      kem: 'x25519',
-      signer,
-    });
-
-    expect(out.id).toBe(PUBLISH_BODY.id);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[0]![0]).toBe('https://cardanowall.com/api/v1/poe/uploads');
-    expect(fetchMock.mock.calls[1]![0]).toBe('https://cardanowall.com/api/v1/poe/publish');
-
-    // The recipient can decrypt the ciphertext we uploaded.
-    expect(capturedCiphertext).toBeInstanceOf(Uint8Array);
-
-    // Submitted record must validate + reference the real ar:// URI.
-    const body = JSON.parse((fetchMock.mock.calls[1]![1] as { body: string }).body) as {
-      record: string;
-    };
-    const validated = validatePoeRecord(hexToBytes(body.record));
-    expect(validated.valid).toBe(true);
-    if (!validated.valid) throw new Error('unreachable');
-    const item = validated.record.items![0]!;
-    expect(item.enc).toBeDefined();
-    expect(item.uris).toBeDefined();
-    expect(item.uris![0]!).toBe(arUri);
-    expect(validated.record.sigs).toHaveLength(1);
-
-    // End-to-end: decrypt the ciphertext we captured with the recipient secret.
-    const envelope = item.enc! as unknown as Record<string, unknown>;
-    const unwrapped = eciesSealedPoeUnwrap({
-      envelope: {
-        scheme: envelope['scheme'] as 1,
-        aead: envelope['aead'] as 'chacha20-poly1305-stream64k',
-        kem: envelope['kem'] as 'x25519',
-        nonce: envelope['nonce'] as Uint8Array,
-        slots: envelope['slots'] as ReadonlyArray<{ epk: Uint8Array; wrap: Uint8Array }>,
-        slots_mac: envelope['slots_mac'] as Uint8Array,
-      },
-      ciphertext: capturedCiphertext!,
-      hashes: item.hashes,
-      recipientSecretKey: recipientSecret,
-    });
-    expect(unwrapped.matched).toBe(true);
-    if (!unwrapped.matched) throw new Error('unreachable');
-    expect(new TextDecoder().decode(unwrapped.plaintext)).toBe('top-secret');
-  });
-
-  it('defaults to the hybrid (mlkem768x25519) KEM: 1216-byte recipient, hybrid envelope round-trips', async () => {
-    const seed = new Uint8Array(32).fill(0x33);
-    const { secretSeed, publicKey } = mlkem768x25519Keygen(seed);
-    const arUri = `ar://${'D'.repeat(43)}`;
-
-    let capturedCiphertext: Uint8Array | undefined;
-    const fetchMock = vi
-      .fn()
-      .mockImplementationOnce(async (_url: string, init: RequestInit) => {
-        const form = (init as { body: FormData }).body;
-        const blob = form.get('file_0') as Blob;
-        capturedCiphertext = new Uint8Array(await blob.arrayBuffer());
-        return jsonResponse(makeUploadsResponse(arUri), 200);
-      })
-      .mockResolvedValueOnce(jsonResponse(PUBLISH_BODY, 202));
-
-    const client = makeClient(fetchMock);
-    // No `kem` passed → hybrid by default.
-    const out = await client.poe.publishSealed({
-      content: 'pq-secret',
-      quoteId: QUOTE_ID,
-      recipients: [publicKey],
-    });
-    expect(out.id).toBe(PUBLISH_BODY.id);
-
-    const body = JSON.parse((fetchMock.mock.calls[1]![1] as { body: string }).body) as {
-      record: string;
-    };
-    const validated = validatePoeRecord(hexToBytes(body.record));
-    expect(validated.valid).toBe(true);
-    if (!validated.valid) throw new Error('unreachable');
-    const item = validated.record.items![0]!;
-    const envelope = item.enc! as unknown as Record<string, unknown>;
-    expect(envelope['kem']).toBe('mlkem768x25519');
-    // Hybrid slots carry the single 1120-byte kem_ct, never a per-slot epk.
-    const slots = envelope['slots'] as ReadonlyArray<{ kem_ct?: unknown; epk?: unknown }>;
-    expect(slots[0]!.kem_ct).toBeInstanceOf(Uint8Array);
-    expect((slots[0]!.kem_ct as Uint8Array).length).toBe(1120);
-    expect(slots[0]!.epk).toBeUndefined();
-
-    const unwrapped = eciesSealedPoeUnwrap({
-      envelope: {
-        scheme: envelope['scheme'] as 1,
-        aead: envelope['aead'] as 'chacha20-poly1305-stream64k',
-        kem: 'mlkem768x25519',
-        nonce: envelope['nonce'] as Uint8Array,
-        slots: envelope['slots'] as ReadonlyArray<{ kem_ct: Uint8Array; wrap: Uint8Array }>,
-        slots_mac: envelope['slots_mac'] as Uint8Array,
-      },
-      ciphertext: capturedCiphertext!,
-      hashes: item.hashes,
-      recipientSecretKey: secretSeed,
-    });
-    expect(unwrapped.matched).toBe(true);
-    if (!unwrapped.matched) throw new Error('unreachable');
-    expect(new TextDecoder().decode(unwrapped.plaintext)).toBe('pq-secret');
-  });
-
-  it('rejects an empty recipients array with PublishError(INVALID_RECIPIENT)', async () => {
-    const fetchMock = vi.fn();
-    const client = makeClient(fetchMock);
-    await expect(
-      client.poe.publishSealed({ content: 'x', quoteId: QUOTE_ID, recipients: [] }),
-    ).rejects.toMatchObject({ code: 'INVALID_RECIPIENT' });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('rejects a wrong-length recipient pubkey for the chosen KEM (32 B under hybrid default)', async () => {
-    const fetchMock = vi.fn();
-    const client = makeClient(fetchMock);
-    // A 32-byte X25519 key under the hybrid default (expects 1216 B) is rejected.
-    await expect(
-      client.poe.publishSealed({
-        content: 'x',
-        quoteId: QUOTE_ID,
-        recipients: [new Uint8Array(32)],
-      }),
-    ).rejects.toMatchObject({ code: 'INVALID_RECIPIENT' });
-    // And a 31-byte key under explicit x25519 (expects 32 B) is rejected.
-    await expect(
-      client.poe.publishSealed({
-        content: 'x',
-        quoteId: QUOTE_ID,
-        recipients: [new Uint8Array(31)],
-        kem: 'x25519',
-      }),
-    ).rejects.toMatchObject({ code: 'INVALID_RECIPIENT' });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('throws PartialUploadError when /uploads returns any failed entry', async () => {
-    const recipientPub = x25519PublicKey({ secretKey: new Uint8Array(32).fill(0x22) });
-    const fetchMock = vi.fn().mockResolvedValueOnce(
-      jsonResponse(
-        {
-          uploads: [
-            {
-              idx: 0,
-              ok: false,
-              error: { code: 'upload-failed', detail: 'arweave timeout' },
-            },
-          ],
-        },
-        200,
-      ),
-    );
-    const client = makeClient(fetchMock);
-    const err = await client.poe
-      .publishSealed({ content: 'x', quoteId: QUOTE_ID, recipients: [recipientPub], kem: 'x25519' })
-      .catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PartialUploadError);
-    const typed = err as PartialUploadError;
-    expect(typed.failedIndices).toEqual([0]);
-    // Only the uploads call was made; /publish never followed.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('PoeNamespace.publishMerkle — Merkle batch via uploads + publish', () => {
-  it('binds merkleSha2256Root(leaves) + leaves.length into merkle[0] of the on-chain record', async () => {
+  it('binds merkleSha2256Root(leaves) + leaves.length into merkle[0] and archives the record bytes', async () => {
     const leaves = [
       nobleSha256(new Uint8Array([0])),
       nobleSha256(new Uint8Array([1])),
@@ -376,26 +200,51 @@ describe('PoeNamespace.publishMerkle — Merkle batch via uploads + publish', ()
 
     const fetchMock = vi
       .fn()
+      .mockResolvedValueOnce(jsonResponse(QUOTE_BODY, 200))
       .mockResolvedValueOnce(jsonResponse(makeUploadsResponse(arUri), 200))
       .mockResolvedValueOnce(jsonResponse(PUBLISH_BODY, 202));
 
     const client = makeClient(fetchMock);
     const signer = makeInMemorySigner();
-    const out = await client.poe.publishMerkle({ leaves, quoteId: QUOTE_ID, signer });
+    const out = await client.poe.publishMerkle({ leaves, signer });
 
     expect(out.leaf_count).toBe(4);
     expect(out.root).toBe(bytesToHex(expectedRoot));
     expect(out.ar_uri).toBe(arUri);
     expect(out.balance_after_usd_micros).toBe('4500000');
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[0]![0]).toBe('https://cardanowall.com/api/v1/poe/uploads');
-    expect(fetchMock.mock.calls[1]![0]).toBe('https://cardanowall.com/api/v1/poe/publish');
+    // The helper quotes internally: quote → uploads → publish.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0]![0]).toBe('https://cardanowall.com/api/v1/poe/quote');
+    expect(fetchMock.mock.calls[1]![0]).toBe('https://cardanowall.com/api/v1/poe/uploads');
+    expect(fetchMock.mock.calls[2]![0]).toBe('https://cardanowall.com/api/v1/poe/publish');
 
-    // Submitted record must validate + carry merkle[0] with the right root.
-    const body = JSON.parse((fetchMock.mock.calls[1]![1] as { body: string }).body) as {
-      record: string;
+    // The quote priced the exact leaves-list byte count and an upper bound
+    // of the record size.
+    const leavesListBytes = await uploadedLeavesList(fetchMock);
+    const quoteBody = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body) as {
+      record_bytes: number;
+      recipient_count: number;
+      file_bytes_total: number;
     };
+    expect(quoteBody.recipient_count).toBe(0);
+    expect(quoteBody.file_bytes_total).toBe(leavesListBytes.length);
+
+    // The upload rode the deterministic content-derived idempotency key.
+    const uploadHeaders = (fetchMock.mock.calls[1]![1] as { headers: Headers }).headers;
+    expect(uploadHeaders.get('idempotency-key')).toBe(
+      `merkle1-${bytesToHex(nobleSha256(leavesListBytes)).slice(0, 32)}`,
+    );
+
+    // Submitted record must validate, carry merkle[0] with the right root,
+    // consume the internal quote, and be archived verbatim in the response.
+    const body = JSON.parse((fetchMock.mock.calls[2]![1] as { body: string }).body) as {
+      record: string;
+      quote_id: string;
+    };
+    expect(body.quote_id).toBe(QUOTE_ID);
+    expect(body.record).toBe(bytesToHex(out.recordBytes));
+    expect(quoteBody.record_bytes).toBeGreaterThanOrEqual(out.recordBytes.length);
     const validated = validatePoeRecord(hexToBytes(body.record));
     expect(validated.valid).toBe(true);
     if (!validated.valid) throw new Error('unreachable');
@@ -405,16 +254,117 @@ describe('PoeNamespace.publishMerkle — Merkle batch via uploads + publish', ()
     expect(validated.record.sigs).toHaveLength(1);
   });
 
+  it('threads leafAlg into the uploaded leaves-list and omits it otherwise', async () => {
+    const leaves = [nobleSha256(new Uint8Array([0])), nobleSha256(new Uint8Array([1]))];
+    const arUri = `ar://${'Y'.repeat(43)}`;
+
+    const run = async (leafAlg: string | undefined): Promise<Uint8Array> => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(QUOTE_BODY, 200))
+        .mockResolvedValueOnce(jsonResponse(makeUploadsResponse(arUri), 200))
+        .mockResolvedValueOnce(jsonResponse(PUBLISH_BODY, 202));
+      const client = makeClient(fetchMock);
+      await client.poe.publishMerkle({
+        leaves,
+        ...(leafAlg !== undefined ? { leafAlg } : {}),
+      });
+      return uploadedLeavesList(fetchMock);
+    };
+
+    // With leafAlg: the uploaded leaves-list carries the advisory claim.
+    const withAlg = decodeLeavesList(await run('sha2-256'));
+    expect(withAlg.leafAlg).toBe('sha2-256');
+    // Without: the field is absent, exactly as before the rework.
+    const withoutAlg = decodeLeavesList(await run(undefined));
+    expect(withoutAlg.leafAlg).toBeUndefined();
+  });
+
+  it('enforces maxUsdMicros against the internal quote before any upload', async () => {
+    const leaves = [nobleSha256(new Uint8Array([0]))];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ ...QUOTE_BODY, amount: '1500000' }, 200));
+    const client = makeClient(fetchMock);
+    const err = await client.poe
+      .publishMerkle({ leaves, maxUsdMicros: 1_000_000n })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MaxUsdExceededError);
+    expect((err as MaxUsdExceededError).quotedUsdMicros).toBe('1500000');
+    // Only the quote was requested; nothing was uploaded or published.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes an expired price lock after the upload and publishes against the new one', async () => {
+    const leaves = [nobleSha256(new Uint8Array([0]))];
+    const arUri = `ar://${'Z'.repeat(43)}`;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { quote_id: 'lock-1', amount: '42', currency: 'USD', expires_at: '2000-01-01T00:00:00Z' },
+          200,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse(makeUploadsResponse(arUri), 200))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { quote_id: 'lock-2', amount: '42', currency: 'USD', expires_at: '2100-01-01T00:00:00Z' },
+          200,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse(PUBLISH_BODY, 202));
+    const client = makeClient(fetchMock);
+    await client.poe.publishMerkle({ leaves });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const body = JSON.parse((fetchMock.mock.calls[3]![1] as { body: string }).body) as {
+      quote_id: string;
+    };
+    expect(body.quote_id).toBe('lock-2');
+  });
+
+  it('re-caps against the refreshed price after a stale-quote refresh, refusing the publish', async () => {
+    const leaves = [nobleSha256(new Uint8Array([0]))];
+    const arUri = `ar://${'W'.repeat(43)}`;
+    // The first lock is stale, so the leaves-list still uploads; the post-upload
+    // requote comes back above the cap and the publish is refused. The cap test
+    // above only exercises the pre-upload internal-quote cap.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { quote_id: 'lock-1', amount: '42', currency: 'USD', expires_at: '2000-01-01T00:00:00Z' },
+          200,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse(makeUploadsResponse(arUri), 200))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            quote_id: 'lock-2',
+            amount: '1500000',
+            currency: 'USD',
+            expires_at: '2100-01-01T00:00:00Z',
+          },
+          200,
+        ),
+      );
+    const client = makeClient(fetchMock);
+    const err = await client.poe
+      .publishMerkle({ leaves, maxUsdMicros: 1_000_000n })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MaxUsdExceededError);
+    expect((err as MaxUsdExceededError).quotedUsdMicros).toBe('1500000');
+    // quote → upload → requote, but NO publish.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('rejects an empty leaves array with PublishError(INVALID_LEAVES)', async () => {
     const fetchMock = vi.fn();
     const client = makeClient(fetchMock);
     const signer = makeInMemorySigner();
-    await expect(
-      client.poe.publishMerkle({ leaves: [], quoteId: QUOTE_ID, signer }),
-    ).rejects.toThrow(PublishError);
-    await expect(
-      client.poe.publishMerkle({ leaves: [], quoteId: QUOTE_ID, signer }),
-    ).rejects.toMatchObject({
+    await expect(client.poe.publishMerkle({ leaves: [], signer })).rejects.toThrow(PublishError);
+    await expect(client.poe.publishMerkle({ leaves: [], signer })).rejects.toMatchObject({
       code: 'INVALID_LEAVES',
     });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -422,26 +372,29 @@ describe('PoeNamespace.publishMerkle — Merkle batch via uploads + publish', ()
 
   it('throws PartialUploadError when /uploads partially fails (publish never runs)', async () => {
     const leaves = [nobleSha256(new Uint8Array([0]))];
-    const fetchMock = vi.fn().mockResolvedValueOnce(
-      jsonResponse(
-        {
-          uploads: [
-            {
-              idx: 0,
-              ok: false,
-              error: { code: 'upload-failed', detail: 'arweave timeout' },
-            },
-          ],
-        },
-        200,
-      ),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(QUOTE_BODY, 200))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            uploads: [
+              {
+                idx: 0,
+                ok: false,
+                error: { code: 'upload-failed', detail: 'arweave timeout' },
+              },
+            ],
+          },
+          200,
+        ),
+      );
     const client = makeClient(fetchMock);
     const signer = makeInMemorySigner();
-    await expect(
-      client.poe.publishMerkle({ leaves, quoteId: QUOTE_ID, signer }),
-    ).rejects.toBeInstanceOf(PartialUploadError);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(client.poe.publishMerkle({ leaves, signer })).rejects.toBeInstanceOf(
+      PartialUploadError,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -530,6 +483,71 @@ describe('PoeNamespace.publishPrehashed — caller-supplied digest', () => {
         quoteId: QUOTE_ID,
         signer,
       }),
+    ).rejects.toMatchObject({ code: 'INVALID_DIGEST' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('strict hex decoding — digest (publishPrehashed) / leaf (publishMerkle)', () => {
+  // Each pair is a full-width (32-byte) hex string whose final byte is
+  // malformed. `parseInt` silently mis-decoded every one of these
+  // (`parseInt('4z',16)===4`, `parseInt('+5',16)===5`, `parseInt('-1',16)===-1`
+  // wrapping to 255, `parseInt(' 4',16)===4`) and yielded a wrong-but-32-byte
+  // digest that then got hashed, paid for on upload, and anchored on-chain.
+  // Strict decode — the same accept/reject set as the Rust SDK's `hex::decode`
+  // — refuses them before any network call, and each publish path raises the
+  // error code its field maps to.
+  const MISDECODE_TAILS = ['4z', '+5', '-1', ' 4'] as const;
+  const PREFIX_31_BYTES = '00'.repeat(31); // 62 hex chars; one byte-pair short of 32
+
+  for (const tail of MISDECODE_TAILS) {
+    const digest = `${PREFIX_31_BYTES}${tail}`;
+
+    it(`publishPrehashed refuses a digest ending in ${JSON.stringify(tail)} as INVALID_DIGEST (no network)`, async () => {
+      const fetchMock = vi.fn();
+      const client = makeClient(fetchMock);
+      await expect(
+        client.poe.publishPrehashed({ hashes: { 'sha2-256': digest }, quoteId: QUOTE_ID }),
+      ).rejects.toMatchObject({ code: 'INVALID_DIGEST' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it(`publishMerkle refuses a leaf ending in ${JSON.stringify(tail)} as INVALID_LEAVES (no network)`, async () => {
+      const fetchMock = vi.fn();
+      const client = makeClient(fetchMock);
+      await expect(client.poe.publishMerkle({ leaves: [digest] })).rejects.toMatchObject({
+        code: 'INVALID_LEAVES',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it('publishPrehashed accepts a mixed-case digest and decodes it to the same bytes as its lowercase twin', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(PUBLISH_BODY));
+    const client = makeClient(fetchMock);
+    const lower = bytesToHex(nobleSha256(new TextEncoder().encode('mixed case digest')));
+
+    const out = await client.poe.publishPrehashed({
+      hashes: { 'sha2-256': lower.toUpperCase() },
+      quoteId: QUOTE_ID,
+    });
+    expect(out.id).toBe(PUBLISH_BODY.id);
+
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body) as {
+      record: string;
+    };
+    const validated = validatePoeRecord(hexToBytes(body.record));
+    expect(validated.valid).toBe(true);
+    if (!validated.valid) throw new Error('unreachable');
+    // The uppercase input anchored the identical digest bytes.
+    expect(bytesToHex(validated.record.items![0]!.hashes['sha2-256']!)).toBe(lower);
+  });
+
+  it('publishPrehashed rejects an odd-length digest as INVALID_DIGEST (no network)', async () => {
+    const fetchMock = vi.fn();
+    const client = makeClient(fetchMock);
+    await expect(
+      client.poe.publishPrehashed({ hashes: { 'sha2-256': '0'.repeat(63) }, quoteId: QUOTE_ID }),
     ).rejects.toMatchObject({ code: 'INVALID_DIGEST' });
     expect(fetchMock).not.toHaveBeenCalled();
   });

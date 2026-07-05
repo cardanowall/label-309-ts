@@ -5,6 +5,35 @@ export { AccountNamespace } from './account';
 export { PoeNamespace } from './poe';
 export { RecordsNamespace } from './records';
 export { PublishError } from './publish';
+export {
+  PREPARED_SEAL_JSON_VERSION,
+  PreparedSeal,
+  PreparedSealItem,
+  PreparedSealJsonError,
+  SealPrepareError,
+  SubmitSealedError,
+  encodeSealedRecord,
+  preparedSealFromJson,
+  preparedSealToJson,
+  publishSealed,
+  quotePreparedSeal,
+  sealPrepare,
+  sealPrepareWithRng,
+  sealedRecord,
+  submitSealed,
+} from './sealed';
+export type {
+  DeterministicRng,
+  PublishSealedInput,
+  QuotePreparedSealInput,
+  SealPrepareInput,
+  SealPrepareItem,
+  SealedSubmission,
+  SubmitSealedInput,
+  UploadReceipt,
+} from './sealed';
+export { InvalidUploadReceiptError } from './invalid-upload-receipt-error';
+export { MaxUsdExceededError } from './max-usd-exceeded-error';
 export { PartialUploadError } from './partial-upload-error';
 export { PoeFailedError } from './poe-failed-error';
 export { PoeWaitTimeoutError } from './poe-wait-timeout-error';
@@ -67,7 +96,6 @@ export type {
   PublishMerkleResponse,
   PublishPrehashedInput,
   PublishResponse,
-  PublishSealedInput,
   QuoteBreakdown,
   QuoteInput,
   QuoteResponse,

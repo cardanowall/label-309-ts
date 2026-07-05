@@ -111,7 +111,7 @@ export interface InclusionCertificateItem {
 export interface InclusionCertificateVerification {
   readonly method: string;
   readonly independent_tools: string[];
-  readonly requires_trust_in_cardanowall: boolean;
+  readonly requires_issuer_trust: boolean;
   readonly time_asserted_by: string;
 }
 

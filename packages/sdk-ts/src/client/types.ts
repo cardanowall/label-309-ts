@@ -727,17 +727,19 @@ export interface AccountBalance {
 }
 
 // =============================================================================
-// High-level publish helpers (publishContent / publishSealed / publishMerkle)
+// High-level publish helpers (publishContent / publishPrehashed / publishMerkle)
 // =============================================================================
 //
 // The low-level uploads / publish methods are honest but verbose. The helpers
 // below collapse the common flows into a single call:
 //
-//   - publishContent({content, quoteId, signer?})              — hash-only
-//   - publishSealed({content, recipients, quoteId, signer?})   — sealed envelope
-//   - publishMerkle({leaves, quoteId, signer?})                — Merkle batch root
+//   - publishContent({content, quoteId, signer?})    — hash-only
+//   - publishPrehashed({hashes, quoteId, signer?})   — caller already holds digest
+//   - publishMerkle({leaves, signer?})               — Merkle batch root
 //
-// Each takes a `quoteId` obtained from a prior call to POST /poe/quote.
+// The hash-only helpers take a `quoteId` obtained from a prior call to POST
+// /poe/quote. `publishMerkle` quotes internally (its record size is knowable
+// only after the leaves-list is encoded); the sealed flow lives in `./sealed`.
 //
 // Signer architecture (see `off-host-sign.ts` privacy contract): the SDK does
 // NOT carry identity keys. Callers pass a `Signer` that owns the Ed25519
@@ -795,60 +797,34 @@ export interface PublishPrehashedInput {
   readonly idempotencyKey?: string;
 }
 
-/**
- * Sealed-PoE helper input. Encrypts `content` to the supplied X25519
- * recipient public keys (age-style sealed envelope), uploads the ciphertext
- * to Arweave via /uploads, builds a Label 309 record with the resulting
- * `ar://` URI in `items[0].uris`, optionally signs it, and submits to
- * /publish.
- *
- * Each recipient public key is a 32-byte raw X25519 public key. At least
- * one recipient is required; the sender SHOULD include themselves as a
- * recipient to retain decrypt access.
- */
-export interface PublishSealedInput {
-  readonly content: Uint8Array | string;
-  /**
-   * Recipient public keys. The length each key MUST be matches the chosen
-   * `kem`: 32 bytes for `x25519`, 1216 bytes for `mlkem768x25519` (X-Wing).
-   */
-  readonly recipients: ReadonlyArray<Uint8Array>;
-  /** UUID returned by POST /poe/quote. */
-  readonly quoteId: string;
-  /** Hash algorithm for the plaintext-bind hash in `items[0].hashes`. */
-  readonly hashAlg?: SupportedHashAlg;
-  /**
-   * KEM the sealed envelope is built under. Defaults to `mlkem768x25519`
-   * (X-Wing hybrid, ML-KEM-768 + X25519) — the post-quantum-safe choice. Pass
-   * `x25519` only for the classical, higher-capacity path. Every recipient MUST
-   * be addressed under this single KEM; mixing is not permitted.
-   */
-  readonly kem?: 'x25519' | 'mlkem768x25519';
-  readonly signer?: Signer;
-  readonly idempotencyKey?: string;
-  /**
-   * Requested chunk size for the resumable-session path taken when the
-   * ciphertext exceeds the single-shot threshold. The server clamps the value
-   * to its `max_chunk_bytes` ceiling and its echo is authoritative; smaller
-   * blobs upload single-shot and ignore this.
-   */
-  readonly chunkBytes?: number;
-}
-
 export interface PublishMerkleInput {
   /**
    * Leaf hashes — either raw 32-byte Uint8Array digests or hex-encoded
    * strings (64 chars, case-insensitive). Tree size is `leaves.length`.
    */
   readonly leaves: ReadonlyArray<Uint8Array | string>;
-  /** UUID returned by POST /poe/quote. */
-  readonly quoteId: string;
   /**
    * Leaf-hash algorithm. Only `'sha2-256'` is supported in v1 because the
    * single registered tree algorithm is `rfc9162-sha256` (SHA-256 underlying).
    */
   readonly hashAlg?: 'sha2-256';
+  /**
+   * The advisory `leaf_alg` written into the uploaded leaves-list, naming how
+   * the leaves were computed (e.g. `sha2-256`). Omit when the leaves carry no
+   * such claim (pass-through digests computed elsewhere).
+   */
+  readonly leafAlg?: string;
   readonly signer?: Signer;
+  /**
+   * Refuse to publish when the quoted price exceeds this many USD micro-cents
+   * (1 USD = 1,000,000), given as a `bigint` or a decimal string. Enforced
+   * against the internal quote and again against any refreshed quote.
+   */
+  readonly maxUsdMicros?: bigint | string;
+  /**
+   * Optional idempotency key for the publish call. The leaves-list upload
+   * uses its own deterministic key derived from the leaves-list bytes.
+   */
   readonly idempotencyKey?: string;
   /**
    * Requested chunk size for the resumable-session path taken when the
@@ -866,6 +842,11 @@ export interface PublishMerkleResponse {
   readonly root: string;
   readonly leaf_count: number;
   readonly ar_uri: string;
+  /**
+   * The exact canonical-CBOR record bytes that were published — archive them
+   * (e.g. as `record_hex` in a receipt).
+   */
+  readonly recordBytes: Uint8Array;
   /** Account balance after the debit, USD micro-cents (decimal string). */
   readonly balance_after_usd_micros: string;
 }

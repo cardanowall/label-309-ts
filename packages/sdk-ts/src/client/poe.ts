@@ -9,10 +9,10 @@
 //
 // Plus high-level helpers that compose the above into common flows:
 //
-//   publishContent({content, quoteId, signer?})            — hash-only
-//   publishPrehashed({hashes, quoteId, signer?})           — caller already holds digest
-//   publishSealed({content, recipients, quoteId, signer?}) — encrypt + uploads + publish
-//   publishMerkle({leaves, quoteId, signer?})              — uploads + publish, Merkle root
+//   publishContent({content, quoteId, signer?})    — hash-only
+//   publishPrehashed({hashes, quoteId, signer?})   — caller already holds digest
+//   publishMerkle({leaves, signer?})               — internal quote + uploads + publish
+//   quotePreparedSeal / submitSealed / publishSealed — the sealed flow (`./sealed`)
 
 import { bytesToHex } from '../hex';
 import { readJson, throwIfNotOk } from './http-helpers';
@@ -22,9 +22,17 @@ import {
   publishContent as publishContentImpl,
   publishMerkle as publishMerkleImpl,
   publishPrehashed as publishPrehashedImpl,
-  publishSealed as publishSealedImpl,
   type ResolvedPublishConfig,
 } from './publish';
+import {
+  publishSealed as publishSealedImpl,
+  quotePreparedSeal as quotePreparedSealImpl,
+  submitSealed as submitSealedImpl,
+  type PublishSealedInput,
+  type QuotePreparedSealInput,
+  type SealedSubmission,
+  type SubmitSealedInput,
+} from './sealed';
 import {
   abandonUploadSession as abandonUploadSessionImpl,
   uploadResumable as uploadResumableImpl,
@@ -42,7 +50,6 @@ import type {
   PublishMerkleResponse,
   PublishPrehashedInput,
   PublishResponse,
-  PublishSealedInput,
   QuoteInput,
   QuoteResponse,
   UploadResumableInput,
@@ -102,8 +109,10 @@ export class PoeNamespace {
    * `amount` is a decimal string; promote it to `BigInt` (or a decimal type)
    * at the application boundary if you need exact arithmetic.
    *
-   * Pass the returned `quote_id` to `publish()` (or one of the high-level
-   * `publishContent` / `publishSealed` / `publishMerkle` helpers).
+   * Pass the returned `quote_id` to `publish()` (or the high-level
+   * `publishContent` / `publishPrehashed` helpers). The priced helpers —
+   * `publishMerkle`, `submitSealed`, `publishSealed` — quote internally from
+   * an exact record-size estimate instead of taking a `quote_id`.
    */
   async quote(input: QuoteInput): Promise<QuoteResponse> {
     const body = {
@@ -134,8 +143,8 @@ export class PoeNamespace {
    * a typed `Label309HttpError` subclass. Per-file failures inside a 200
    * response are NOT thrown by `uploads()` itself — the response body is
    * returned verbatim so the caller can decide how to react. The
-   * higher-level helpers (`publishSealed`, `publishMerkle`) treat any failed
-   * file as a `PartialUploadError`.
+   * higher-level helpers (`submitSealed`, `publishMerkle`) escalate any
+   * failed file to a `PartialUploadError`.
    */
   async uploads(input: UploadsInput): Promise<UploadsResponse> {
     const form = new FormData();
@@ -239,7 +248,7 @@ export class PoeNamespace {
   /**
    * Submit a single finalised canonical-CBOR record to Cardano. Caller is
    * responsible for constructing the record bytes (use `publishContent` /
-   * `publishSealed` / `publishMerkle` for the assisted flows) and for
+   * `submitSealed` / `publishMerkle` for the assisted flows) and for
    * acquiring a `quote_id` via `quote()` first.
    *
    * Returns 202 (`dedup_hit: false`) on freshly enqueued records, or 200
@@ -335,15 +344,37 @@ export class PoeNamespace {
   }
 
   /**
-   * Sealed-PoE: encrypt the supplied content to the recipient X25519 public
-   * keys (age-style sealed envelope), upload the ciphertext to Arweave via
-   * /uploads, build a Label 309 record with the resulting `ar://` URI, sign
-   * it (optional), and submit via /publish.
-   *
-   * The sender SHOULD include their own X25519 public key in `recipients`
-   * to retain decrypt access — the SDK does NOT inject the sender silently.
+   * Price a prepared seal without uploading anything — the preview a UI
+   * shows before the user commits to storage. The returned quote may later
+   * be passed to `submitSealed` as its optional price lock.
    */
-  async publishSealed(input: PublishSealedInput): Promise<PublishResponse> {
+  async quotePreparedSeal(input: QuotePreparedSealInput): Promise<QuoteResponse> {
+    return quotePreparedSealImpl(this.config as ResolvedPublishConfig, input);
+  }
+
+  /**
+   * Phase 2 of the sealed flow: submit a `PreparedSeal` produced by
+   * `sealPrepare` — internal exact-size quote, price-cap check, per-item
+   * ciphertext uploads under deterministic idempotency keys, quote refresh
+   * when an upload outlived the price lock, encode (optionally sign), and
+   * publish. Rejects with `SubmitSealedError` carrying the completed
+   * `UploadReceipt`s, so a retry resumes without re-paying storage.
+   */
+  async submitSealed(input: SubmitSealedInput): Promise<SealedSubmission> {
+    return submitSealedImpl(this.config as ResolvedPublishConfig, input);
+  }
+
+  /**
+   * One-shot sealed publish: encrypt every item to the recipient public keys
+   * (age-style sealed envelope), then run the full `submitSealed` flow —
+   * internal quote, uploads, publish. Flows that must survive a crash use
+   * the two-phase `sealPrepare` + `submitSealed` pair instead and persist
+   * the artifacts.
+   *
+   * The sender SHOULD include their own public key in `recipients` to
+   * retain decrypt access — the SDK does NOT inject the sender silently.
+   */
+  async publishSealed(input: PublishSealedInput): Promise<SealedSubmission> {
     return publishSealedImpl(this.config as ResolvedPublishConfig, input);
   }
 

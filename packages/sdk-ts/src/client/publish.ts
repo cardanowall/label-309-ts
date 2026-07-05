@@ -1,20 +1,22 @@
-// High-level publish helpers — collapse the new uploads + publish flow into
-// single calls for the three common shapes:
+// High-level publish helpers — collapse the quote + uploads + publish flow
+// into single calls for the common shapes:
 //
-//   1. `publishContent({content, signer?})` — anchor a single content blob by
-//      its `sha2-256` (or `blake2b-256`) digest. No Arweave, no /uploads —
-//      the record is constructed entirely client-side and posted directly to
-//      /publish.
+//   1. `publishContent({content, quoteId, signer?})` — anchor a single content
+//      blob by its `sha2-256` (or `blake2b-256`) digest. No Arweave, no
+//      /uploads — the record is constructed entirely client-side and posted
+//      directly to /publish against a caller-supplied quote.
 //
-//   2. `publishSealed({content, recipients, signer?})` — encrypt the content
-//      to the recipient X25519 public keys (age-style sealed envelope),
-//      upload the ciphertext to Arweave via /uploads, build a Label 309 record
-//      with the resulting `ar://` URI, sign, and post to /publish.
+//   2. `publishPrehashed({hashes, quoteId, signer?})` — the caller already
+//      holds the digest(s).
 //
 //   3. `publishMerkle({leaves, signer?})` — anchor an arbitrary number of leaf
 //      hashes under a single RFC 9162 §2.1.1 root, with the leaves-list CBOR
-//      uploaded to Arweave via /uploads. The Merkle root + leaf_count are
-//      bound into the on-chain record via `merkle[0]`.
+//      uploaded to Arweave via /uploads. The helper quotes internally from the
+//      exact-width record-size estimate, enforces the caller's price cap, and
+//      refreshes the price lock when the upload outlived it.
+//
+// The sealed-PoE flow lives in `./sealed`: the two-phase `sealPrepare` /
+// `submitSealed` pair plus the one-shot `publishSealed` wrapper.
 //
 // Signer architecture: the SDK does NOT hold identity keys (privacy contract
 // in `off-host-sign.ts`). The helpers take an optional `Signer` that owns the
@@ -31,14 +33,10 @@ import {
   MERKLE_ALG_ID,
 } from '@cardanowall/crypto-core/hash';
 import { encodeLeavesList } from '@cardanowall/crypto-core/merkle';
-import { eciesSealedPoeWrap } from '@cardanowall/crypto-core/sealed-poe';
-import {
-  encodePoeRecord,
-  type EncryptionEnvelope,
-  type MerkleCommit,
-  type PoeRecord,
-} from '@cardanowall/poe-standard';
+import { encodePoeRecord, type MerkleCommit, type PoeRecord } from '@cardanowall/poe-standard';
 
+import { estimateRecordBytes, type RecordShape } from '../estimate/index';
+import { MaxUsdExceededError } from './max-usd-exceeded-error';
 import { assembleCoseSign1, prepareSigStructure } from './off-host-sign';
 import { PartialUploadError } from './partial-upload-error';
 import { parseHttpError } from './parse-http-error';
@@ -54,7 +52,8 @@ import type {
   PublishMerkleResponse,
   PublishPrehashedInput,
   PublishResponse,
-  PublishSealedInput,
+  QuoteInput,
+  QuoteResponse,
   Signer,
   StorageTarget,
   SupportedHashAlg,
@@ -64,10 +63,19 @@ import type {
 
 const ED25519_PUBLIC_KEY_LENGTH = 32;
 const ED25519_SIGNATURE_LENGTH = 64;
-const X25519_PUBLIC_KEY_LENGTH = 32;
-const MLKEM768X25519_PUBLIC_KEY_LENGTH = 1216;
 const LEAF_DIGEST_LENGTH = 32;
 const STORAGE_TARGET_ARWEAVE = 'arweave' as const;
+
+// An Arweave transaction id is always 43 base64url characters, so a not-yet-
+// minted `ar://<tx>` URI has a fixed final width. Charging a placeholder of
+// exactly that width in a pre-upload record-size estimate keeps the quoted
+// `record_bytes` an upper bound of the published record.
+const ARWEAVE_TX_ID_CHARS = 43;
+
+// The prefix of the deterministic leaves-list upload idempotency key, and how
+// many leading hex characters of the leaves-list digest the key carries.
+const MERKLE_UPLOAD_KEY_PREFIX = 'merkle1-';
+const MERKLE_UPLOAD_KEY_DIGEST_CHARS = 32;
 
 export interface ResolvedPublishConfig {
   readonly apiKey: string | undefined;
@@ -82,7 +90,9 @@ export class PublishError extends Error {
     | 'INVALID_LEAVES'
     | 'INVALID_DIGEST'
     | 'INVALID_RECIPIENT'
-    | 'UNSUPPORTED_HASH_ALG';
+    | 'UNSUPPORTED_HASH_ALG'
+    | 'INVALID_MAX_USD'
+    | 'INVALID_QUOTE_AMOUNT';
 
   constructor(code: PublishError['code'], message: string) {
     super(message);
@@ -95,22 +105,41 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-function hexToBytes(hex: string): Uint8Array {
+/** The value of one hex digit, or `undefined` for any other character. */
+function hexNibble(code: number): number | undefined {
+  if (code >= 48 && code <= 57) return code - 48; // 0-9
+  if (code >= 97 && code <= 102) return code - 97 + 10; // a-f
+  if (code >= 65 && code <= 70) return code - 65 + 10; // A-F
+  return undefined;
+}
+
+/**
+ * Strict hex decode: an even length and every character in `[0-9a-fA-F]`
+ * (mixed case accepted), rejecting whitespace, sign characters, and any other
+ * byte. This is deliberately stricter than `parseInt`, which silently tolerates
+ * `"4z"`, `" 4"`, `"+5"`, or `"-1"` and would decode corrupted digest / leaf
+ * bytes that then get hashed, priced, and anchored on-chain. The accept/reject
+ * set matches the Rust SDK's `hex::decode`, so the same input is honoured or
+ * refused identically across implementations. `code` is the `PublishError`
+ * code the caller's field maps to (leaves vs digest).
+ */
+function hexToBytes(hex: string, code: PublishError['code']): Uint8Array {
   if (hex.length % 2 !== 0) {
-    throw new PublishError('INVALID_LEAVES', `hex string has odd length: ${hex.length}`);
+    throw new PublishError(code, `hex string has odd length: ${hex.length}`);
   }
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
-    const byte = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-    if (Number.isNaN(byte)) {
-      throw new PublishError('INVALID_LEAVES', `invalid hex byte at offset ${i * 2}`);
+    const hi = hexNibble(hex.charCodeAt(i * 2));
+    const lo = hexNibble(hex.charCodeAt(i * 2 + 1));
+    if (hi === undefined || lo === undefined) {
+      throw new PublishError(code, `invalid hex byte at offset ${i * 2}`);
     }
-    out[i] = byte;
+    out[i] = (hi << 4) | lo;
   }
   return out;
 }
 
-function toBytes(content: Uint8Array | string): Uint8Array {
+export function toBytes(content: Uint8Array | string): Uint8Array {
   if (typeof content === 'string') return new TextEncoder().encode(content);
   return content;
 }
@@ -126,7 +155,7 @@ function cloneToOwnedBuffer(src: Uint8Array): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-function hashContent(bytes: Uint8Array, alg: SupportedHashAlg): Uint8Array<ArrayBuffer> {
+export function hashContent(bytes: Uint8Array, alg: SupportedHashAlg): Uint8Array<ArrayBuffer> {
   if (alg === 'sha2-256') return cloneToOwnedBuffer(sha256(bytes));
   if (alg === 'blake2b-256') return cloneToOwnedBuffer(blake2b256(bytes));
   throw new PublishError(
@@ -135,7 +164,7 @@ function hashContent(bytes: Uint8Array, alg: SupportedHashAlg): Uint8Array<Array
   );
 }
 
-function assertSigner(signer: Signer): void {
+export function assertSigner(signer: Signer): void {
   if (
     !(signer.signerPubkey instanceof Uint8Array) ||
     signer.signerPubkey.length !== ED25519_PUBLIC_KEY_LENGTH
@@ -152,13 +181,6 @@ function assertSigner(signer: Signer): void {
 
 function buildJsonHeaders(apiKey: string | undefined, idempotencyKey?: string): Headers {
   const headers = new Headers({ 'content-type': 'application/json', accept: 'application/json' });
-  if (apiKey !== undefined) headers.set('authorization', `Bearer ${apiKey}`);
-  if (idempotencyKey !== undefined) headers.set('idempotency-key', idempotencyKey);
-  return headers;
-}
-
-function buildMultipartHeaders(apiKey: string | undefined, idempotencyKey?: string): Headers {
-  const headers = new Headers({ accept: 'application/json' });
   if (apiKey !== undefined) headers.set('authorization', `Bearer ${apiKey}`);
   if (idempotencyKey !== undefined) headers.set('idempotency-key', idempotencyKey);
   return headers;
@@ -217,12 +239,15 @@ async function signAndEncodeRecord(record: PoeRecord, signer: Signer): Promise<U
   return encodePoeRecord(signed);
 }
 
-async function encodeRecord(record: PoeRecord, signer: Signer | undefined): Promise<Uint8Array> {
+export async function encodeRecord(
+  record: PoeRecord,
+  signer: Signer | undefined,
+): Promise<Uint8Array> {
   if (signer === undefined) return encodePoeRecord(record);
   return signAndEncodeRecord(record, signer);
 }
 
-async function postPublish(
+export async function postPublish(
   config: ResolvedPublishConfig,
   recordBytesHex: string,
   quoteId: string,
@@ -239,6 +264,25 @@ async function postPublish(
   return { ...parsed, dedup_hit: response.status === 200 };
 }
 
+/** POST a quote request for the given byte counts and return the price lock. */
+export async function postQuote(
+  config: ResolvedPublishConfig,
+  input: QuoteInput,
+): Promise<QuoteResponse> {
+  const body = {
+    record_bytes: input.recordBytes,
+    recipient_count: input.recipientCount,
+    file_bytes_total: input.fileBytesTotal,
+  };
+  const response = await config.fetch(`${config.baseUrl}/poe/quote`, {
+    method: 'POST',
+    headers: buildJsonHeaders(config.apiKey),
+    body: JSON.stringify(body),
+  });
+  await throwIfNotOk(response);
+  return (await readJson(response)) as QuoteResponse;
+}
+
 // Single-shot multipart upload of one blob, resolving its `ar://` URI. Backs
 // the small-blob branch of `uploadBlob` and the resumable helper's
 // below-threshold fast path.
@@ -252,9 +296,12 @@ const singleShotUpload =
       new Blob([bytes as unknown as ArrayBuffer], { type: 'application/octet-stream' }),
       'file_0.bin',
     );
+    const headers = new Headers({ accept: 'application/json' });
+    if (config.apiKey !== undefined) headers.set('authorization', `Bearer ${config.apiKey}`);
+    if (idempotencyKey !== undefined) headers.set('idempotency-key', idempotencyKey);
     const response = await config.fetch(`${config.baseUrl}/poe/uploads`, {
       method: 'POST',
-      headers: buildMultipartHeaders(config.apiKey, idempotencyKey),
+      headers,
       body: form,
       ...(signal ? { signal } : {}),
     });
@@ -274,7 +321,7 @@ const singleShotUpload =
 // session flow so a multi-GB ciphertext clears CDN/proxy single-request caps.
 // Both paths end at the same URI, so the publisher helpers' signatures and
 // on-chain record shape are unaffected by the blob's size.
-async function uploadBlob(
+export async function uploadBlob(
   config: ResolvedPublishConfig,
   bytes: Uint8Array,
   idempotencyKey: string | undefined,
@@ -296,6 +343,111 @@ async function uploadBlob(
     ...(chunkBytes !== undefined ? { chunkBytes } : {}),
   });
   return result.uri;
+}
+
+// =============================================================================
+// Quote freshness and the price cap
+// =============================================================================
+
+/**
+ * A worst-case-width stand-in for a not-yet-minted `ar://<tx>` URI, used in
+ * pre-upload record-size estimates.
+ */
+export function arweaveUriPlaceholder(): string {
+  return `ar://${'A'.repeat(ARWEAVE_TX_ID_CHARS)}`;
+}
+
+// The quote-expiry safety margin: a quote expiring within this window is
+// refreshed rather than raced against the gateway's TTL check at consume time.
+const QUOTE_EXPIRY_SKEW_MS = 30_000;
+
+/**
+ * Parse an RFC 3339 timestamp (date, time, optional fractional seconds, a
+ * `Z` or `±HH:MM` offset) to epoch milliseconds. Returns `undefined` for
+ * anything else — including a timestamp with no offset, which `Date.parse`
+ * would otherwise read in the host's local zone and make the freshness
+ * verdict machine-dependent.
+ */
+function rfc3339ToEpochMs(text: string): number | undefined {
+  const match =
+    /^(\d{4}-\d{2}-\d{2})[Tt ](\d{2}:\d{2}:\d{2}(?:\.\d+)?)([Zz]|[+-]\d{2}:\d{2})$/.exec(
+      text.trim(),
+    );
+  if (match === null) return undefined;
+  const offset = match[3]!;
+  const iso = `${match[1]}T${match[2]}${offset === 'z' ? 'Z' : offset}`;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/**
+ * Whether the price lock is still comfortably inside its TTL. An unparseable
+ * `expires_at` reads as fresh: the client cannot assess it, a re-quote would
+ * carry an equally unparseable one, and the gateway stays the authority at
+ * consume time.
+ */
+export function quoteIsFresh(quote: QuoteResponse): boolean {
+  const expires = rfc3339ToEpochMs(quote.expires_at);
+  if (expires === undefined) return true;
+  return Date.now() + QUOTE_EXPIRY_SKEW_MS < expires;
+}
+
+/**
+ * Normalize a caller-supplied price cap to a non-negative bigint of USD
+ * micro-cents. Strings must be plain decimal integers (money never rides a
+ * float). Returns `undefined` when no cap was given.
+ */
+export function normalizeMaxUsdMicros(value: bigint | string | undefined): bigint | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'bigint') {
+    if (value < 0n) {
+      throw new PublishError('INVALID_MAX_USD', `maxUsdMicros must be non-negative, got ${value}`);
+    }
+    return value;
+  }
+  if (!/^\d+$/.test(value)) {
+    throw new PublishError(
+      'INVALID_MAX_USD',
+      `maxUsdMicros must be a decimal micro-USD string, got ${JSON.stringify(value)}`,
+    );
+  }
+  return BigInt(value);
+}
+
+/**
+ * Refuse to proceed when the quoted price exceeds the caller's cap in USD
+ * micro-cents. Money stays an integer in-process and a decimal string on the
+ * wire, so the comparison parses the gateway's `amount` string exactly.
+ */
+export function enforceMaxUsdMicros(maxUsdMicros: bigint | undefined, quote: QuoteResponse): void {
+  if (maxUsdMicros === undefined) return;
+  if (!/^\d+$/.test(quote.amount)) {
+    throw new PublishError(
+      'INVALID_QUOTE_AMOUNT',
+      `quote amount ${JSON.stringify(quote.amount)} is not a decimal micro-USD string`,
+    );
+  }
+  if (BigInt(quote.amount) > maxUsdMicros) {
+    throw new MaxUsdExceededError({ quotedUsdMicros: quote.amount, maxUsdMicros });
+  }
+}
+
+/**
+ * Re-establish the price lock when a slow step (a storage upload) outlived
+ * the quote's TTL: fetch a fresh quote for the same shape and re-enforce the
+ * price cap against the NEW price — FX may have moved while the upload ran,
+ * and the cap is a promise about what gets spent.
+ */
+export async function refreshQuoteIfStale(
+  config: ResolvedPublishConfig,
+  quote: QuoteResponse,
+  input: QuoteInput,
+  maxUsdMicros: bigint | undefined,
+): Promise<QuoteResponse> {
+  if (quoteIsFresh(quote)) return quote;
+  const fresh = await postQuote(config, input);
+  enforceMaxUsdMicros(maxUsdMicros, fresh);
+  return fresh;
 }
 
 /**
@@ -355,7 +507,7 @@ export async function publishPrehashed(
         `unsupported hash algorithm '${alg as string}' (expected 'sha2-256' or 'blake2b-256')`,
       );
     }
-    const bytes = hexToBytes(hex);
+    const bytes = hexToBytes(hex, 'INVALID_DIGEST');
     const expected = DIGEST_BYTE_LENGTH[alg];
     if (bytes.length !== expected) {
       throw new PublishError(
@@ -375,105 +527,29 @@ export async function publishPrehashed(
 }
 
 /**
- * Sealed-PoE: encrypt content to N X25519 recipients (age-style envelope),
- * upload the ciphertext to Arweave, build a single-item record with the
- * resulting `ar://` URI and the sealed envelope in `items[0].enc`, sign
- * (optional), and post to /publish.
- *
- * The plaintext content-hash is bound into `items[0].hashes` so any verifier
- * that successfully decrypts the ciphertext can reconstruct the plaintext
- * and prove the chain of custody from the on-chain hash to the decrypted
- * bytes.
+ * The deterministic leaves-list upload idempotency key:
+ * `"merkle1-" + sha256(leavesListBytes)[..32]`. The leaves-list encoding is
+ * canonical, so the same batch always presents the same key and a
+ * crash-and-retry can never double-pay its storage upload.
  */
-export async function publishSealed(
-  config: ResolvedPublishConfig,
-  input: PublishSealedInput,
-): Promise<PublishResponse> {
-  if (input.signer !== undefined) assertSigner(input.signer);
-  if (input.recipients.length < 1) {
-    throw new PublishError(
-      'INVALID_RECIPIENT',
-      'publishSealed requires at least one recipient public key',
-    );
-  }
-  // Default to the post-quantum-safe X-Wing hybrid KEM; x25519 is the explicit
-  // classical opt-out. The recipient length guard is KEM-aware: 32 B for
-  // x25519, 1216 B for the hybrid path.
-  const kem = input.kem ?? 'mlkem768x25519';
-  const expectedRecipientLength =
-    kem === 'x25519' ? X25519_PUBLIC_KEY_LENGTH : MLKEM768X25519_PUBLIC_KEY_LENGTH;
-  for (let i = 0; i < input.recipients.length; i++) {
-    const pub = input.recipients[i]!;
-    if (!(pub instanceof Uint8Array) || pub.length !== expectedRecipientLength) {
-      throw new PublishError(
-        'INVALID_RECIPIENT',
-        `recipients[${i}] must be a ${expectedRecipientLength}-byte public key for kem='${kem}'`,
-      );
-    }
-  }
-
-  const hashAlg: SupportedHashAlg = input.hashAlg ?? 'sha2-256';
-  const plaintext = toBytes(input.content);
-  const plaintextDigest = hashContent(plaintext, hashAlg);
-  const hashes = { [hashAlg]: plaintextDigest };
-
-  // Encrypt the plaintext to the recipient public keys under the chosen KEM.
-  // The item's plaintext-hash claim is bound into the slots transcript, so
-  // the envelope cannot later be spliced onto a different hashes map.
-  const sealed = eciesSealedPoeWrap({
-    plaintext,
-    hashes,
-    recipientPublicKeys: input.recipients.map((r) => r),
-    kem,
-  });
-
-  // Upload the ciphertext to Arweave (resumable for large ciphertexts).
-  const uri = await uploadBlob(config, sealed.ciphertext, input.idempotencyKey, input.chunkBytes);
-
-  // Build the sealed record: one item with the plaintext-bind hash, the
-  // `ar://<tx>` URI of the ciphertext, and the discriminated envelope shape.
-  // Narrow on the envelope `kem` to emit the correct per-slot fields:
-  // classical slots carry `{ epk, wrap }`, hybrid slots carry the single
-  // 1120-byte `{ kem_ct, wrap }`.
-  const env = sealed.envelope;
-  const slots =
-    env.kem === 'mlkem768x25519'
-      ? env.slots.map((s) => ({
-          kem_ct: cloneToOwnedBuffer(s.kem_ct),
-          wrap: cloneToOwnedBuffer(s.wrap),
-        }))
-      : env.slots.map((s) => ({
-          epk: cloneToOwnedBuffer(s.epk),
-          wrap: cloneToOwnedBuffer(s.wrap),
-        }));
-  const envelope: EncryptionEnvelope = {
-    scheme: 1,
-    aead: env.aead,
-    kem: env.kem,
-    nonce: cloneToOwnedBuffer(env.nonce),
-    slots,
-    slots_mac: cloneToOwnedBuffer(env.slots_mac),
-  };
-
-  const record: PoeRecord = {
-    v: 1,
-    items: [
-      {
-        hashes,
-        uris: [uri],
-        enc: envelope,
-      },
-    ],
-  };
-  const recordBytes = await encodeRecord(record, input.signer);
-  return postPublish(config, bytesToHex(recordBytes), input.quoteId, input.idempotencyKey);
+function merkleUploadIdempotencyKey(leavesList: Uint8Array): string {
+  const digest = bytesToHex(sha256(leavesList));
+  return `${MERKLE_UPLOAD_KEY_PREFIX}${digest.slice(0, MERKLE_UPLOAD_KEY_DIGEST_CHARS)}`;
 }
 
 /**
- * Merkle batch publish via /uploads + /publish — N leaves under one
- * transaction. The leaves-list CBOR is uploaded to Arweave as a single
- * blob; the on-chain record carries
+ * Merkle batch publish — N leaves under one transaction. The leaves-list
+ * CBOR is uploaded to Arweave as a single blob; the on-chain record carries
  * `merkle[0] = { alg: 'rfc9162-sha256', root, leaf_count, uris: [ar://<tx>] }`.
+ *
+ * The helper owns the whole priced flow: it quotes internally from the
+ * exact-width record-size estimate (the `ar://` URI exists only after the
+ * upload, but an Arweave transaction id is fixed-width, so the estimate is
+ * exact), enforces `maxUsdMicros`, uploads the canonical leaves-list under a
+ * deterministic idempotency key derived from the leaves-list bytes (a retry
+ * of the same batch never pays for its storage twice), refreshes the price
+ * lock when the upload outlived it, and publishes. The response carries the
+ * exact published record bytes.
  *
  * Only `sha2-256` leaves are supported because `rfc9162-sha256` is the only
  * registered tree algorithm and its underlying hash is SHA-256 (32-byte
@@ -493,9 +569,10 @@ export async function publishMerkle(
   if (input.leaves.length < 1) {
     throw new PublishError('INVALID_LEAVES', 'publishMerkle requires at least one leaf hash');
   }
+  const maxUsdMicros = normalizeMaxUsdMicros(input.maxUsdMicros);
 
   const leaves: Uint8Array[] = input.leaves.map((leaf, idx) => {
-    const bytes = typeof leaf === 'string' ? hexToBytes(leaf) : leaf;
+    const bytes = typeof leaf === 'string' ? hexToBytes(leaf, 'INVALID_LEAVES') : leaf;
     if (!(bytes instanceof Uint8Array) || bytes.length !== LEAF_DIGEST_LENGTH) {
       throw new PublishError(
         'INVALID_LEAVES',
@@ -506,10 +583,36 @@ export async function publishMerkle(
   });
 
   const root = cloneToOwnedBuffer(merkleSha2256Root(leaves));
-  const leavesListCbor = encodeLeavesList({ leaves, root });
+  const leavesListCbor = encodeLeavesList({
+    leaves,
+    root,
+    ...(input.leafAlg !== undefined ? { leafAlg: input.leafAlg } : {}),
+  });
 
-  // Upload the leaves-list to Arweave (resumable for large leaves-lists).
-  const uri = await uploadBlob(config, leavesListCbor, input.idempotencyKey, input.chunkBytes);
+  // The record side of the quote is the exact-width upper-bound estimate
+  // with the fixed-width URI placeholder; the storage side is the exact
+  // leaves-list byte count.
+  const shape: RecordShape = {
+    signed: input.signer !== undefined,
+    supersedes: false,
+    merkle: { alg: MERKLE_ALG_ID, uris: [arweaveUriPlaceholder()] },
+  };
+  const quoteInput: QuoteInput = {
+    recordBytes: estimateRecordBytes(shape),
+    recipientCount: 0,
+    fileBytesTotal: leavesListCbor.length,
+  };
+  let quote = await postQuote(config, quoteInput);
+  enforceMaxUsdMicros(maxUsdMicros, quote);
+
+  // Upload the leaves-list to Arweave (resumable for large leaves-lists)
+  // under its deterministic content-derived idempotency key.
+  const uploadKey = merkleUploadIdempotencyKey(leavesListCbor);
+  const uri = await uploadBlob(config, leavesListCbor, uploadKey, input.chunkBytes);
+
+  // A large upload can outlive the price lock; publish only against a live
+  // one, re-enforcing the cap against the refreshed price.
+  quote = await refreshQuoteIfStale(config, quote, quoteInput, maxUsdMicros);
 
   // Build the on-chain record with the resulting `ar://` URI.
   const merkleEntry: MerkleCommit = {
@@ -523,7 +626,7 @@ export async function publishMerkle(
   const published = await postPublish(
     config,
     bytesToHex(recordBytes),
-    input.quoteId,
+    quote.quote_id,
     input.idempotencyKey,
   );
 
@@ -534,6 +637,7 @@ export async function publishMerkle(
     root: bytesToHex(root),
     leaf_count: leaves.length,
     ar_uri: uri,
+    recordBytes,
     balance_after_usd_micros: published.balance_after_usd_micros,
   };
 }

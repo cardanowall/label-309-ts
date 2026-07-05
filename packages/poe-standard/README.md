@@ -19,17 +19,7 @@ result, in any implementation, against shared test vectors.
 
 ## Install
 
-The Label 309 TypeScript packages are pre-1.0 and not yet published to npm. Build from the workspace:
-
 ```sh
-pnpm install
-pnpm --filter @cardanowall/poe-standard typecheck
-```
-
-Once published, the install will be:
-
-```sh
-# once published
 npm install @cardanowall/poe-standard
 ```
 
@@ -58,7 +48,7 @@ const bytes: Uint8Array = encodePoeRecord(record);
 import { validatePoeRecord } from '@cardanowall/poe-standard';
 
 const result = validatePoeRecord(bytes);
-if (result.ok) {
+if (result.valid) {
   // result.record is the decoded PoeRecord.
   // result.info / result.warnings carry non-fatal issues (e.g. an
   // unsupported-but-tolerated signature algorithm id).
@@ -73,7 +63,7 @@ if (result.ok) {
 
 `validatePoeRecord` never throws: every failure — malformed/non-canonical CBOR, schema mismatch,
 registry violation, bad URI, malformed signature entry — is returned as data in a discriminated
-`ValidateResult` union. The result is sorted, stable, and identical across the TS/Python/Rust
+`ValidationResult` union. The result is sorted, stable, and identical across the TS/Python/Rust
 implementations.
 
 ### Build the bytes a record-level signature covers
@@ -91,21 +81,35 @@ const body: Uint8Array = encodeRecordBodyForSigning(record);
 
 ## Records on chain: chunk → validate
 
-The Cardano ledger caps every metadata byte string and text string at 64 bytes, so a Label 309 record
-is stored as an **array of ≤64-byte CBOR-bytes chunks** under label 309, and the metadata map itself
-is wrapped in the Conway tag-259 form. A verifier reassembles the chunk array (and unwraps tag-259)
-before calling `validatePoeRecord` — the validator operates on the single reconstructed record byte
-string. The chunking helpers are exported from the root:
+The Cardano ledger caps every metadata byte string at 64 bytes, so the serialised record body crosses
+the ledger as a **whole-body chunk array**: a CBOR array of ≤64-byte byte strings whose in-order
+concatenation is the canonical body. This transport split is the _only_ chunking the format performs —
+fields inside the reassembled body (URIs, COSE_Sign1 and COSE_Key blobs) are ordinary CBOR values with
+no per-field chunk wrappers of their own. A verifier reassembles the array before calling
+`validatePoeRecord`, so the validator only ever sees the single reconstructed body. Both directions of
+the transport are exported from the root:
 
 ```ts
-import { chunkBytes, bytesChunkArrayConcat } from '@cardanowall/poe-standard';
+import {
+  chunkRecordBody,
+  encodeLabel309Value,
+  reassembleLabel309Value,
+  validatePoeRecord,
+} from '@cardanowall/poe-standard';
 
-const chunks = chunkBytes(bytes); // Uint8Array[] of ≤64-byte chunks, for label 309
-const whole = bytesChunkArrayConcat(chunks); // reassemble before validate
+// Producer: canonical body bytes → the chunk array stored under label 309.
+const chunks = chunkRecordBody(bodyBytes); // Uint8Array[], each ≤ 64 bytes
+const label309Value = encodeLabel309Value(bodyBytes); // the CBOR bytes of that array
+
+// Verifier: raw label-309 value bytes → the body, before validation.
+const reassembled = reassembleLabel309Value(label309Value);
+if (reassembled.ok) {
+  const result = validatePoeRecord(reassembled.body);
+  // …handle result.valid
+} else {
+  // reassembled.issue is a MALFORMED_CBOR / CHUNK_TOO_LARGE ValidationIssue.
+}
 ```
-
-`chunkUri` / `reconstructChunkedUri` do the same for the chunked URI arrays carried in
-`items[i].uris` and `merkle[i].uris`, splitting on UTF-8 codepoint boundaries.
 
 ## API overview
 
@@ -120,11 +124,12 @@ The package root re-exports every group. Subpath imports are available for `./sc
 
 **Validate** (`@cardanowall/poe-standard/validator`)
 
-- `validatePoeRecord(bytes)` — the structural pipeline: canonical decode → schema parse → cross-field
-  domain checks. Returns a discriminated `ValidateResult`; never throws.
+- `validatePoeRecord(bytes, options?)` — the structural pipeline: canonical decode → schema parse →
+  cross-field domain checks. Returns a discriminated `ValidationResult` (`valid: true` with `record` /
+  `warnings?` / `info?`, or `valid: false` with `issues`); never throws.
 - `validateCidProfile(cid)` — offline IPFS CID-profile parser (CIDv0 and the Label 309 CIDv1 multibase
   / multicodec / multihash profile).
-- `type ValidateResult`, `type ValidationIssue`.
+- `type ValidationResult`, `type ValidationIssue`, `type ValidatorOptions`, `type ValidatorRole`.
 
 **Error codes** (`@cardanowall/poe-standard/error-codes`)
 
@@ -138,22 +143,24 @@ The package root re-exports every group. Subpath imports are available for `./sc
 **Schema + types** (`@cardanowall/poe-standard/schema`)
 
 - Zod schemas for the full v1 wire surface: `PoeRecordSchema`, `ItemEntrySchema`,
-  `MerkleCommitSchema`, `EncryptionEnvelopeSchema`, `SlotSchema`, `PassphraseBlockSchema`,
-  `Argon2idParamsSchema`, `HashesMapSchema`, `HashDigestSchema`, `SigEntrySchema`,
-  `SupersedesSchema`, `VersionLiteralSchema`, and the `ChunkedBytesArraySchema` / `UriChunkArraySchema`
-  chunk-array schemas.
-- Inferred types: `PoeRecord`, `ItemEntry`, `MerkleCommit`, `EncryptionEnvelope`, `Slot`,
-  `PassphraseBlock`, `Argon2idParams`, `HashesMap`, `UriChunkArray`, `ChunkedBytesArray`, `SigEntry`,
+  `MerkleCommitSchema`, `EncryptionEnvelopeSchema`, `EncScheme1Schema`, `EncOpaqueSchema`,
+  `SlotSchema`, `PassphraseBlockSchema`, `Argon2idParamsSchema`, `HashesMapSchema`, `HashDigestSchema`,
+  `UriSchema`, `SigEntrySchema`, `SupersedesSchema`, `VersionLiteralSchema`.
+- Inferred types: `PoeRecord`, `ItemEntry`, `MerkleCommit`, `EncryptionEnvelope`, `EncScheme1`,
+  `EncOpaque`, `Slot`, `PassphraseBlock`, `Argon2idParams`, `HashesMap`, `Uri`, `SigEntry`,
   `Supersedes`.
 - Extension-key helpers: `TOP_LEVEL_BASE_KEYS`, `isExtensionKey`, `EXTENSION_KEY_VENDOR_RE`,
   `EXTENSION_KEY_COMPANION_RE`.
 
-**Chunking** (re-exported from the root)
+**Carriage** (re-exported from the root)
 
-- `chunkBytes` / `bytesChunkArrayConcat` — split/reassemble chunked byte strings (COSE_Sign1,
-  COSE_Key blobs).
-- `chunkUri` / `reconstructChunkedUri` — split/reassemble chunked URI arrays on UTF-8 boundaries.
-- `type ReconstructUriResult`.
+- `chunkRecordBody(body)` / `encodeLabel309Value(body)` — the producer side: split the canonical body
+  into the whole-body ≤64-byte transport chunk array, or serialise that array to the label-309 value
+  bytes.
+- `reassembleLabel309Value(valueBytes)` — the consumer side: reassemble the label-309 value into the
+  record body, returning a `Label309ReassemblyResult` (`ok: true` with `body`, or `ok: false` with a
+  `MALFORMED_CBOR` / `CHUNK_TOO_LARGE` issue). Run before `validatePoeRecord`.
+- `TRANSPORT_CHUNK_MAX_BYTES` (64), `type Label309ReassemblyResult`.
 
 For the exhaustive surface, see `src/index.ts`.
 

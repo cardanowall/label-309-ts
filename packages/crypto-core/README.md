@@ -24,17 +24,8 @@ every seed-derived identity carries an X-Wing keypair so it can always _receive_
 
 ## Install
 
-The package is pre-1.0 and not yet published. Build it from the workspace:
-
 ```sh
-pnpm install
-pnpm --filter @cardanowall/crypto-core typecheck
-```
-
-Once published, it will install as:
-
-```sh
-npm install @cardanowall/crypto-core   # once published
+npm install @cardanowall/crypto-core
 ```
 
 It ships as ESM, targets modern Node.js and browsers, and uses Web Crypto / `crypto.getRandomValues`
@@ -85,21 +76,30 @@ seed yields a complete, deterministic identity.
 ```ts
 import {
   deriveX25519KeypairFromSeed,
+  dualHash,
   eciesSealedPoeWrap,
   eciesSealedPoeUnwrap,
 } from '@cardanowall/crypto-core';
 
 const recipient = deriveX25519KeypairFromSeed(crypto.getRandomValues(new Uint8Array(32)));
+const plaintext = new TextEncoder().encode('secret payload');
+
+// The item's plaintext-hash claim is bound into the envelope's slots MAC, so
+// wrap and unwrap are handed the same `hashes` map (algorithm id → digest).
+const { sha256 } = dualHash(plaintext);
+const hashes = { 'sha2-256': sha256 };
 
 // Default KEM is classical X25519; pass kem: 'mlkem768x25519' for the hybrid PQ branch.
 const { envelope, ciphertext } = eciesSealedPoeWrap({
-  plaintext: new TextEncoder().encode('secret payload'),
+  plaintext,
+  hashes,
   recipientPublicKeys: [recipient.publicKey],
 });
 
 const result = eciesSealedPoeUnwrap({
   envelope,
   ciphertext,
+  hashes,
   recipientSecretKey: recipient.secretKey,
 });
 

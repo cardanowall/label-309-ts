@@ -1,6 +1,6 @@
 {
   "name": "@cardanowall/poe-standard",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "type": "module",
   "description": "Label 309 Proof-of-Existence record schema, canonical-CBOR encoder, and validator.",
   "license": "Apache-2.0",

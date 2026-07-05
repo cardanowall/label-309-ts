@@ -15,16 +15,7 @@ It builds on two lower-level packages — [`@cardanowall/poe-standard`](../poe-s
 
 ## Install
 
-Not yet published. Build from the workspace or vendor the package directly:
-
 ```sh
-pnpm --filter @cardanowall/sdk-ts build
-```
-
-Once published to npm the install will be:
-
-```sh
-# once published
 npm install @cardanowall/sdk-ts
 ```
 
@@ -102,7 +93,47 @@ const result = await client.poe.publishContent({
 console.log(result.id, result.status, result.balance_after_usd_micros);
 ```
 
-`client.poe` also exposes `publishPrehashed`, `publishSealed`, `publishMerkle`, the low-level `uploads` / `publish` / `publishBatch`, and `quote`. `client.inbox.list()` / `client.inbox.get(txHash)` page through the sealed records addressed to the authenticated account.
+`client.poe` also exposes `publishPrehashed`, the low-level `uploads` / `publish` / `publishBatch`, and `quote`. `client.records.list({ sealed: true })` pages through the sealed records addressed to the authenticated account (the gateway resolves "addressed to me" from the bearer identity).
+
+The priced helpers quote internally, so they take a `maxUsdMicros` price cap instead of a `quoteId`. `publishMerkle({ leaves, leafAlg?, maxUsdMicros?, signer? })` commits N leaf hashes under one RFC 9162 root and returns the exact published `recordBytes`. The sealed flow is two-phase, so a failed publish never re-encrypts or re-pays storage:
+
+```ts
+import { sealPrepare, preparedSealToJson, preparedSealFromJson } from '@cardanowall/sdk-ts';
+
+// Phase 1 — pure and offline: encrypt every item to the recipient set.
+const prepared = sealPrepare({
+  items: [{ content: fileBytes }],
+  recipients: [recipientPublicKey], // 1216-byte X-Wing keys (or 32-byte x25519 with kem: 'x25519')
+});
+persist(preparedSealToJson(prepared)); // the portable prepared_seal_json_v1 artifact
+
+// Optional price preview before committing to storage.
+const quote = await client.poe.quotePreparedSeal({ prepared });
+
+// Phase 2 — online: quote → upload ciphertexts → publish. A failure after a
+// paid upload throws a `SubmitSealedError` whose `uploads` are validated
+// receipts; persist them and pass them back as `uploaded` on the retry to
+// resume without re-uploading (or re-paying for) that storage.
+import { SubmitSealedError, type UploadReceipt } from '@cardanowall/sdk-ts';
+
+async function submit(uploaded: readonly UploadReceipt[] = []) {
+  try {
+    return await client.poe.submitSealed({
+      prepared: preparedSealFromJson(restore()),
+      maxUsdMicros: 2_000_000n, // refuse to spend more than $2
+      uploaded, // receipts recovered from a prior attempt, if any
+    });
+  } catch (err) {
+    if (err instanceof SubmitSealedError) persist(err.uploads); // resume from these later
+    throw err;
+  }
+}
+
+const submission = await submit();
+console.log(submission.response.id, submission.uris, submission.recordBytes);
+```
+
+`client.poe.publishSealed({ items, recipients, ... })` is the one-shot form of the same flow (prepare + submit in one call) for flows that need no crash resume.
 
 ### Sign off-host (key never enters the SDK)
 
@@ -160,10 +191,11 @@ Everything is reachable from the package root; submodule entry points (`/verifie
 **Client** (`/client`)
 
 - `Label309Client({ baseUrl, apiKey?, fetch? })` — `baseUrl` required, key opaque.
-- `client.poe.{quote, publishContent, publishPrehashed, publishSealed, publishMerkle, uploads, publish, publishBatch}`.
-- `client.records.{get, verify}`, `client.inbox.{list, get}`, `client.account.balance()`.
+- `client.poe.{quote, publishContent, publishPrehashed, quotePreparedSeal, submitSealed, publishSealed, publishMerkle, uploads, publish, publishBatch}`.
+- Two-phase sealed publishing: `sealPrepare`, `preparedSealToJson` / `preparedSealFromJson` (the portable `prepared_seal_json_v1` artifact), `sealedRecord` / `encodeSealedRecord` (air-gap assembly seams), plus `UploadReceipt`-carrying errors (`SubmitSealedError`).
+- `client.records.{list, count, get}`, `client.account.balance()`. Sealed records addressed to the caller come from `client.records.list({ sealed: true })` — there is no server-side verify endpoint, so a verdict always runs through the standalone verifier.
 - Off-host signing: `prepareSigStructure`, `assembleCoseSign1`, plus the CIP-8 hashed-mode pair `prepareSigStructureHashed` / `assembleCoseSign1Hashed`.
-- Typed errors extending `Label309HttpError`: `InsufficientFundsError`, `QuoteExpiredError`, `QuoteAlreadyConsumedError`, `FxStaleError`, `RateLimitedError`, `UnauthorizedError`, `ValidationFailedError`, `MalformedCborError`, `InvalidClientConfigError`, and more.
+- HTTP errors extending `Label309HttpError`: `InsufficientFundsError`, `QuoteExpiredError`, `QuoteAlreadyConsumedError`, `ServiceUnavailableError` (503, e.g. no FX snapshot yet — retryable), `RateLimitedError`, `UnauthorizedError`, `ValidationFailedError`, `MalformedCborError`, and more. Client-side errors extend plain `Error`: `InvalidClientConfigError` (bad config) and `MaxUsdExceededError` (a quote exceeded the `maxUsdMicros` cap).
 
 **Identity** (`/identity`)
 

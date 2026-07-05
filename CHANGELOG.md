@@ -9,6 +9,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 > release. Pre-1.0 versions do not carry the stability guarantees of
 > [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-07-05
+
+### Breaking
+
+- `sdk-ts`: the sealed helper is now two-phase and the one-shot loses `quoteId`. `publishSealed(cfg, { items, recipients, maxUsdMicros })` seals a multi-item record and quotes the exact size internally under an optional USD cap; there is no separate `quote` step and no `quoteId`. `publishMerkle(cfg, { leaves, leafAlg?, maxUsdMicros? })` likewise quotes internally (no `quoteId`) and returns the published `recordBytes`.
+- `sdk-ts`: the inclusion-certificate `verification.requires_trust_in_cardanowall` field is renamed `requires_issuer_trust`.
+
+### Added
+
+- `sdk-ts`: two-phase sealed publishing. `sealPrepare` encrypts every item offline and returns the portable, fingerprinted `prepared_seal_json_v1` artifact (`preparedSealToJson` / `preparedSealFromJson`); `submitSealed` runs the online half (internal exact-size quote, refresh-if-stale, upload, publish). A publish that fails after a paid upload throws `SubmitSealedError` carrying validated `UploadReceipt`s, so a retry resumes without re-encrypting or re-paying storage. `quotePreparedSeal` previews the price; `sealedRecord` / `encodeSealedRecord` are the air-gap seams. `SealedSubmission` returns the record bytes, URIs, receipts, and quote.
+- `sdk-ts`: `publishMerkle` carries an optional `leafAlg` through to the leaves list.
+
+### Changed
+
+- `sdk-ts`: `preparedSealFromJson` accepts only the exact canonical serialization of `prepared_seal_json_v1` — non-canonical encodings (a null optional member, a non-integer `scheme`, a duplicate key, reordered keys) are rejected identically across the TypeScript, Python, and Rust SDKs.
+- `crypto-core` and `poe-standard`: released with the coordinated 0.10.0 SDK minor; no functional changes.
+
 ## [0.9.0] - 2026-07-03
 
 ### Added

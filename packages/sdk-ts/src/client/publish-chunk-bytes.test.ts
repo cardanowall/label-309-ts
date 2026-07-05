@@ -11,8 +11,14 @@ import { x25519PublicKey } from '@cardanowall/crypto-core/kem';
 import { Label309Client } from './label-309-client';
 import { DEFAULT_RESUMABLE_THRESHOLD_BYTES } from './resumable-upload';
 
-const QUOTE_ID = '01956b41-7c00-7000-8000-000000000001';
 const REQUESTED_CHUNK_BYTES = 5_242_880; // 5 MiB, well under the server cap
+
+const QUOTE_BODY = {
+  quote_id: '01956b41-7c00-7000-8000-000000000001',
+  amount: '42',
+  currency: 'USD',
+  expires_at: '2100-01-01T00:00:00Z',
+};
 
 const PUBLISH_BODY = {
   id: 'poe_06bqrjg0csvqfanaqexvqexvqc',
@@ -43,6 +49,9 @@ describe('publishSealed — chunkBytes plumbs into the resumable session create'
 
       const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit): Promise<Response> => {
         const path = new URL(typeof url === 'string' ? url : url.toString()).pathname;
+        if (path.endsWith('/poe/quote')) {
+          return jsonResponse(QUOTE_BODY, 200);
+        }
         if (path.endsWith('/poe/uploads/sessions')) {
           sessionCreateBody = JSON.parse(init!.body as string) as {
             chunk_bytes: number;
@@ -78,15 +87,14 @@ describe('publishSealed — chunkBytes plumbs into the resumable session create'
       const content = new Uint8Array(DEFAULT_RESUMABLE_THRESHOLD_BYTES + 1);
       const recipientPub = x25519PublicKey({ secretKey: new Uint8Array(32).fill(0x22) });
 
-      const response = await client.poe.publishSealed({
-        content,
+      const submission = await client.poe.publishSealed({
+        items: [{ content }],
         recipients: [recipientPub],
-        quoteId: QUOTE_ID,
         kem: 'x25519',
         chunkBytes: REQUESTED_CHUNK_BYTES,
       });
 
-      expect(response.id).toBe(PUBLISH_BODY.id);
+      expect(submission.response.id).toBe(PUBLISH_BODY.id);
       expect(sessionCreateBody).toBeDefined();
       expect(sessionCreateBody!.chunk_bytes).toBe(REQUESTED_CHUNK_BYTES);
       expect(sessionCreateBody!.total_bytes).toBeGreaterThan(DEFAULT_RESUMABLE_THRESHOLD_BYTES);

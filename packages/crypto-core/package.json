@@ -1,6 +1,6 @@
 {
   "name": "@cardanowall/crypto-core",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "type": "module",
   "description": "Closed-catalogue cryptographic primitives for Label 309 Proof-of-Existence (TypeScript reference implementation; byte-identical Python parity twin).",
   "license": "Apache-2.0",

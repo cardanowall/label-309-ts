@@ -122,6 +122,33 @@ describe('buildInclusionCertificate + verifyInclusionCertificate round-trip', ()
     // No null leaked into the serialised form.
     expect(JSON.stringify(cert.anchor)).not.toContain('null');
   });
+
+  it('emits an issuer-independent verification block with the advertised tools', () => {
+    const leaves = makeLeaves(4);
+    const merkle = merkleFor(leaves);
+    const cert = buildInclusionCertificate({
+      anchor: anchorFor(),
+      merkle,
+      leaves,
+      targets: [{ leaf: leaves[1]!, leafAlg: 'sha2-256' }],
+    });
+
+    const v = cert.verification;
+    // Independently verifiable: the proof recomputes from public data, so the
+    // issuer is never a trusted party.
+    expect(v.requires_issuer_trust).toBe(false);
+    // The exact independent-tool list every conforming producer must emit.
+    expect(v.independent_tools).toEqual([
+      'cardanowall certificate verify <file>',
+      'cardanowall merkle verify (per item)',
+      'any RFC 9162 / COSE verifiable-data-structure verifier',
+    ]);
+    // Time is asserted by the chain via public explorers, never by the issuer.
+    expect(v.time_asserted_by).toBe('Cardano blockchain (block time), via public explorers');
+    // The method names the RFC 9162 recompute-and-compare procedure.
+    expect(v.method).toContain('RFC 9162');
+    expect(v.method).toContain('recompute the Merkle root');
+  });
 });
 
 describe('tamper detection', () => {

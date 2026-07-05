@@ -7,7 +7,7 @@
 //   GET  /records/{tx_hash}         → records.get(txHash)
 //
 // The PoE namespace owns the mutation methods (uploads, publish,
-// publishBatch + the high-level publishContent/publishSealed/publishMerkle
+// publishBatch + the high-level publishContent/submitSealed/publishMerkle
 // helpers); reads live here under Records — same tag grouping the OpenAPI
 // registry uses (`tags: ['Records']` on these operationIds).
 //
