@@ -51,13 +51,22 @@
 import { sha256 } from '@cardanowall/crypto-core/hash';
 import {
   eciesSealedPoeWrap,
+  passphraseSealedPoeSeal,
   SEALED_POE_AEAD,
+  type PassphraseParams,
+  type PassphraseSealedPoeOutput,
   type SealedEnvelope,
   type SealedKem,
 } from '@cardanowall/crypto-core/sealed-poe';
-import type { EncryptionEnvelope, PoeRecord } from '@cardanowall/poe-standard';
+import {
+  encodePoeRecord,
+  isArweaveTxUri,
+  isFetchSetUri,
+  type EncryptionEnvelope,
+  type PoeRecord,
+} from '@cardanowall/poe-standard';
 
-import { estimateRecordBytes, type RecordShape } from '../estimate/index';
+import { COSE_SIGN1_PATH1_BYTES, estimateRecordBytes, type RecordShape } from '../estimate/index';
 import { bytesToHex } from '../hex';
 import { InvalidUploadReceiptError } from './invalid-upload-receipt-error';
 import {
@@ -71,11 +80,15 @@ import {
   postQuote,
   quoteIsFresh,
   refreshQuoteIfStale,
+  resolveHashAlgs,
   toBytes,
   uploadBlob,
   type ResolvedPublishConfig,
 } from './publish';
 import type { PublishResponse, QuoteInput, QuoteResponse, Signer, SupportedHashAlg } from './types';
+
+/** The Label 309 passphrase-KDF identifier carried in the on-chain `enc` block. */
+const PASSPHRASE_KDF_ARGON2ID = 'argon2id';
 
 /** The version literal of the portable prepared-seal serialization. */
 export const PREPARED_SEAL_JSON_VERSION = 'prepared_seal_json_v1';
@@ -113,6 +126,7 @@ export class SealPrepareError extends Error {
     | 'INVALID_RECIPIENT'
     | 'URI_COUNT_MISMATCH'
     | 'INVALID_SUPERSEDES'
+    | 'INVALID_URI'
     | 'CRYPTO_FAILURE';
 
   constructor(code: SealPrepareError['code'], message: string) {
@@ -217,8 +231,12 @@ export interface SealPrepareInput {
    * `mlkem768x25519`.
    */
   readonly kem?: 'x25519' | 'mlkem768x25519';
-  /** The plaintext-bind hash algorithm. Defaults to `sha2-256`. */
-  readonly hashAlg?: SupportedHashAlg;
+  /**
+   * The plaintext-bind hash algorithms. Empty (or omitted) defaults to a
+   * single `sha2-256` entry; several algorithms co-hash each item into a
+   * multi-entry `hashes` map, every digest bound into the envelope's slots MAC.
+   */
+  readonly hashAlgs?: readonly SupportedHashAlg[];
 }
 
 /** Input to `quotePreparedSeal`. */
@@ -299,8 +317,11 @@ export interface PublishSealedInput {
    * include themselves as a recipient to retain decrypt access.
    */
   readonly recipients: ReadonlyArray<Uint8Array>;
-  /** The plaintext-bind hash algorithm (defaults to `sha2-256`). */
-  readonly hashAlg?: SupportedHashAlg;
+  /**
+   * The plaintext-bind hash algorithms. Empty (or omitted) defaults to a
+   * single `sha2-256` entry; several algorithms co-hash each item.
+   */
+  readonly hashAlgs?: readonly SupportedHashAlg[];
   /**
    * The KEM the envelopes are built under. Defaults to `mlkem768x25519`
    * (X-Wing hybrid, ML-KEM-768 + X25519) — the post-quantum-safe choice.
@@ -1091,16 +1112,23 @@ function prepare(input: SealPrepareInput, rng: DeterministicRng | undefined): Pr
       );
     }
   }
-  const hashAlg: SupportedHashAlg = input.hashAlg ?? 'sha2-256';
+  const hashAlgs = resolveHashAlgs(undefined, input.hashAlgs);
 
   const itemsData: PreparedItemData[] = [];
   for (const item of input.items) {
     const plaintext = toBytes(item.content);
-    const digest = hashContent(plaintext, hashAlg);
-    // The item's hash claim is an input to the wrap: its digest is bound
-    // into the slot-set MAC, so the envelope commits to exactly the
-    // `hashes` map this record will carry.
-    const hashes: Record<string, Uint8Array> = { [hashAlg]: digest };
+    // The item's hash claim is an input to the wrap: every digest is bound
+    // into the slot-set MAC, so the envelope commits to exactly the `hashes`
+    // map this record will carry. A single algorithm produces the same
+    // one-entry map (and identical bytes) as before co-hashing; canonical CBOR
+    // sorts the map, so the ciphertext is independent of the algorithm order.
+    const hashes: Record<string, Uint8Array> = {};
+    const hashesMap = new Map<string, Uint8Array>();
+    for (const alg of hashAlgs) {
+      const digest = hashContent(plaintext, alg);
+      hashes[alg] = digest;
+      hashesMap.set(alg, digest);
+    }
     let sealed: { envelope: SealedEnvelope; ciphertext: Uint8Array };
     try {
       if (rng === undefined) {
@@ -1151,7 +1179,7 @@ function prepare(input: SealPrepareInput, rng: DeterministicRng | undefined): Pr
     itemsData.push({
       itemId: bytesToHex(sha256(sealed.ciphertext)),
       ciphertext: sealed.ciphertext,
-      hashes: new Map([[hashAlg, digest]]),
+      hashes: hashesMap,
       envelope: sealed.envelope,
     });
   }
@@ -1206,6 +1234,25 @@ function buildRecordEnvelope(env: SealedEnvelope): EncryptionEnvelope {
 }
 
 /**
+ * Reject any storage URI that is not a well-formed fetch-set member before it
+ * is embedded as a record URI. This is the one seam every sealed URI — a fresh
+ * gateway upload, a resumed receipt, or an air-gapped caller's out-of-band URI —
+ * flows through on its way into the record, and it enforces the exact grammar
+ * the canonical validator uses (via the single-sourced `isFetchSetUri`), so no
+ * assembled record can carry a URI a downstream verifier would reject.
+ */
+function validateAssembledUris(uris: ReadonlyArray<string>): void {
+  for (const uri of uris) {
+    if (!isFetchSetUri(uri)) {
+      throw new SealPrepareError(
+        'INVALID_URI',
+        `${uri} is not a valid ar:// or ipfs:// fetch-set uri`,
+      );
+    }
+  }
+}
+
+/**
  * Assemble the Label 309 record from prepared material and the uploaded
  * storage URIs — the pure seam air-gapped flows build on.
  *
@@ -1214,7 +1261,8 @@ function buildRecordEnvelope(env: SealedEnvelope): EncryptionEnvelope {
  * replaces, when any.
  *
  * Throws `SealPrepareError` with code `URI_COUNT_MISMATCH` on a wrong URI
- * count and `INVALID_SUPERSEDES` on a malformed supersedes hash.
+ * count, `INVALID_URI` on a malformed storage URI, and `INVALID_SUPERSEDES`
+ * on a malformed supersedes hash.
  */
 export function sealedRecord(
   prepared: PreparedSeal,
@@ -1228,6 +1276,7 @@ export function sealedRecord(
       `expected ${data.itemsData.length} storage uri(s), one per item, got ${uris.length}`,
     );
   }
+  validateAssembledUris(uris);
   const supersedesBytes = supersedes === undefined ? undefined : parseSupersedesHex(supersedes);
   const items = data.itemsData.map((item, index) => {
     const hashes: Record<string, Uint8Array<ArrayBuffer>> = {};
@@ -1325,23 +1374,26 @@ export async function quotePreparedSeal(
 
 /**
  * Validate resume receipts against the prepared material, keyed by item
- * index. Every field must match — an unknown `itemId`, a digest or byte
- * count that differs from the prepared ciphertext, an empty URI, or a
- * duplicate receipt is rejected outright rather than skipped.
+ * index. Every field must match — an unknown `itemId`, a digest or byte count
+ * that differs from the prepared ciphertext, a URI that is not a valid Arweave
+ * `ar://<43-char txid>` (a sealed ciphertext is always stored on Arweave, so
+ * the receipt URI is fixed-width — this both rejects a hand-crafted URI that
+ * would fail canonical validation and keeps the pre-upload exact-size quote
+ * exact), or a duplicate receipt is rejected outright rather than skipped.
  */
 function validateReceipts(
-  data: PreparedSealData,
+  itemsData: ReadonlyArray<{ readonly itemId: string; readonly ciphertext: Uint8Array }>,
   uploaded: ReadonlyArray<UploadReceipt>,
 ): Map<number, UploadReceipt> {
   const byIndex = new Map<number, UploadReceipt>();
   for (const receipt of uploaded) {
-    const index = data.itemsData.findIndex((item) => item.itemId === receipt.itemId);
+    const index = itemsData.findIndex((item) => item.itemId === receipt.itemId);
     if (index < 0) {
       throw new InvalidUploadReceiptError(
         `item_id ${receipt.itemId} does not belong to the prepared seal`,
       );
     }
-    const item = data.itemsData[index]!;
+    const item = itemsData[index]!;
     const digest = receipt.ciphertextSha256;
     if (
       !(digest instanceof Uint8Array) ||
@@ -1357,8 +1409,12 @@ function validateReceipts(
         `receipt for ${receipt.itemId} declares ${receipt.bytes} byte(s), prepared ciphertext is ${item.ciphertext.length}`,
       );
     }
-    if (receipt.uri.length === 0) {
-      throw new InvalidUploadReceiptError(`receipt for ${receipt.itemId} carries an empty uri`);
+    if (!isArweaveTxUri(receipt.uri)) {
+      throw new InvalidUploadReceiptError(
+        `receipt for ${receipt.itemId} carries ${JSON.stringify(
+          receipt.uri,
+        )}, not a valid Arweave ar://<43-char txid> uri`,
+      );
     }
     if (byIndex.has(index)) {
       throw new InvalidUploadReceiptError(`duplicate receipt for ${receipt.itemId}`);
@@ -1406,7 +1462,7 @@ export async function submitSealed(
     if (input.signer !== undefined) assertSigner(input.signer);
     if (input.supersedes !== undefined) parseSupersedesHex(input.supersedes);
     maxUsdMicros = normalizeMaxUsdMicros(input.maxUsdMicros);
-    resumed = validateReceipts(data, input.uploaded ?? []);
+    resumed = validateReceipts(data.itemsData, input.uploaded ?? []);
   } catch (error) {
     throw new SubmitSealedError([], error);
   }
@@ -1504,12 +1560,661 @@ export async function publishSealed(
       items: input.items,
       recipients: input.recipients,
       ...(input.kem !== undefined ? { kem: input.kem } : {}),
-      ...(input.hashAlg !== undefined ? { hashAlg: input.hashAlg } : {}),
+      ...(input.hashAlgs !== undefined ? { hashAlgs: input.hashAlgs } : {}),
     });
   } catch (error) {
     throw new SubmitSealedError([], error);
   }
   return submitSealed(config, {
+    prepared,
+    ...(input.signer !== undefined ? { signer: input.signer } : {}),
+    ...(input.maxUsdMicros !== undefined ? { maxUsdMicros: input.maxUsdMicros } : {}),
+    ...(input.supersedes !== undefined ? { supersedes: input.supersedes } : {}),
+    ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+    ...(input.chunkBytes !== undefined ? { chunkBytes: input.chunkBytes } : {}),
+  });
+}
+
+// =============================================================================
+// Passphrase sealed publishing (the shared-secret key path)
+// =============================================================================
+//
+// A passphrase seal delivers the content key through an Argon2id-stretched
+// passphrase instead of per-recipient KEM slots, so its envelope carries a
+// `passphrase` block (`{alg, salt, params}`) and no `slots` / `slots_mac` /
+// `kem`; the key commitment lives inside the ciphertext blob. The two-phase
+// shape mirrors the recipient path exactly — a pure offline
+// `passphraseSealPrepare`, a `quotePreparedPassphraseSeal` price preview, and
+// an online `submitPassphraseSealed` with resumable `UploadReceipt`s — so a
+// caller prepares and publishes a passphrase-sealed record the same way it does
+// a recipient-sealed one.
+
+// The 16-byte Argon2id salt and 24-byte content nonce drawn per envelope, the
+// deterministic per-item upload-key prefix, and the domain tag the fingerprint
+// is computed over.
+const PASSPHRASE_SALT_BYTES = 16;
+const PASSPHRASE_NONCE_BYTES = 24;
+const PASSPHRASE_UPLOAD_KEY_PREFIX = 'pwseal1-';
+const PASSPHRASE_FINGERPRINT_DOMAIN = 'prepared_passphrase_seal_v1';
+
+/**
+ * The Argon2id cost parameters a passphrase seal is built under. The default is
+ * the product's producer default: the registry floors for memory (`m = 65536`
+ * KiB) and iterations (`t = 3`) plus the RFC 9106 §4 recommended parallelism
+ * (`p = 4`). Every SDK uses the same default so a CLI-sealed passphrase record
+ * and a web-sealed one share work factors.
+ */
+export type PassphraseKdfParams = PassphraseParams;
+
+/** The producer-default Argon2id cost parameters (`m = 65536`, `t = 3`, `p = 4`). */
+export const DEFAULT_PASSPHRASE_KDF_PARAMS: PassphraseKdfParams = { m: 65536, t: 3, p: 4 };
+
+// =============================================================================
+// Passphrase inputs
+// =============================================================================
+
+/** Input to `passphraseSealPrepare` / `passphraseSealPrepareWithRng`. */
+export interface PassphraseSealPrepareInput {
+  /**
+   * The plaintext items to seal (1..=N). Every item is sealed under the same
+   * passphrase; the published record carries one content item per input item.
+   */
+  readonly items: ReadonlyArray<SealPrepareItem>;
+  /** The shared passphrase. Normalized under the pinned profile before the KDF. */
+  readonly passphrase: string;
+  /**
+   * The plaintext-bind hash algorithms. Empty (or omitted) defaults to a single
+   * `sha2-256` entry; several algorithms co-hash each item into a multi-entry
+   * `hashes` map, bound into the in-ciphertext key commitment.
+   */
+  readonly hashAlgs?: readonly SupportedHashAlg[];
+  /** The Argon2id cost parameters (defaults to `DEFAULT_PASSPHRASE_KDF_PARAMS`). */
+  readonly params?: PassphraseKdfParams;
+}
+
+/** Input to `quotePreparedPassphraseSeal`. */
+export interface QuotePreparedPassphraseSealInput {
+  /** The prepared passphrase seal to price. */
+  readonly prepared: PreparedPassphraseSeal;
+  /**
+   * The record-level signer the eventual submit will use, when any. Only its
+   * presence affects the price (a signed record is larger); the signer is not
+   * invoked.
+   */
+  readonly signer?: Signer;
+  /**
+   * The 64-hex transaction hash the eventual record will supersede, when any.
+   * Only its presence affects the price.
+   */
+  readonly supersedes?: string;
+}
+
+/** Input to `submitPassphraseSealed`. */
+export interface SubmitPassphraseSealedInput {
+  /** The prepared passphrase seal to submit. */
+  readonly prepared: PreparedPassphraseSeal;
+  /** The optional record-level signer. */
+  readonly signer?: Signer;
+  /**
+   * Refuse to publish when the quoted price exceeds this many USD micro-cents
+   * (1 USD = 1,000,000), given as a `bigint` or a decimal string. Enforced
+   * against the initial quote and again against any refreshed quote.
+   */
+  readonly maxUsdMicros?: bigint | string;
+  /**
+   * An optional prior price preview (from `quotePreparedPassphraseSeal`). A
+   * still-fresh preview is consumed as the price lock; a stale one is silently
+   * replaced by a fresh internal quote.
+   */
+  readonly quote?: QuoteResponse;
+  /** The 64-hex transaction hash of the record this one supersedes. */
+  readonly supersedes?: string;
+  /** Optional idempotency key for the publish call. */
+  readonly idempotencyKey?: string;
+  /**
+   * The intended chunk size in bytes for the ciphertext uploads. Omitted uses
+   * the resumable helper's default; the server's `max_chunk_bytes` always
+   * clamps it down when tighter.
+   */
+  readonly chunkBytes?: number;
+  /**
+   * Receipts from a previous attempt's completed uploads. Each is validated
+   * against the prepared material; a validated receipt's item skips the upload.
+   */
+  readonly uploaded?: ReadonlyArray<UploadReceipt>;
+}
+
+/**
+ * Input to `publishPassphraseSealed` — the one-shot passphrase publish
+ * (`passphraseSealPrepare` + `submitPassphraseSealed` in one call).
+ */
+export interface PublishPassphraseSealedInput {
+  /** The plaintext items to seal (1..=N). */
+  readonly items: ReadonlyArray<SealPrepareItem>;
+  /** The shared passphrase. */
+  readonly passphrase: string;
+  /** The plaintext-bind hash algorithms (empty/omitted defaults to a single `sha2-256`). */
+  readonly hashAlgs?: readonly SupportedHashAlg[];
+  /** The Argon2id cost parameters (defaults to `DEFAULT_PASSPHRASE_KDF_PARAMS`). */
+  readonly params?: PassphraseKdfParams;
+  /** The optional record-level signer. */
+  readonly signer?: Signer;
+  /**
+   * Refuse to publish when the quoted price exceeds this many USD micro-cents,
+   * given as a `bigint` or a decimal string.
+   */
+  readonly maxUsdMicros?: bigint | string;
+  /** The 64-hex transaction hash of the record this one supersedes. */
+  readonly supersedes?: string;
+  /** Optional idempotency key for the publish call. */
+  readonly idempotencyKey?: string;
+  /** The intended chunk size in bytes for the ciphertext uploads. */
+  readonly chunkBytes?: number;
+}
+
+// =============================================================================
+// The prepared passphrase artifact
+// =============================================================================
+
+// Facade internals live in module-private WeakMaps (as with `PreparedSeal`),
+// so an in-memory artifact carries no own enumerable state: it can never drift
+// from its fingerprint, and — critically — it never stores the passphrase, the
+// content key, or any plaintext, so logging or serializing a prepared seal
+// cannot leak a secret. The accessors hand out defensive copies only.
+interface PreparedPassphraseItemData {
+  readonly itemId: string;
+  readonly ciphertext: Uint8Array;
+  readonly hashes: ReadonlyMap<string, Uint8Array>;
+  readonly salt: Uint8Array;
+  readonly nonce: Uint8Array;
+  readonly params: PassphraseKdfParams;
+}
+
+interface PreparedPassphraseSealData {
+  readonly itemsData: ReadonlyArray<PreparedPassphraseItemData>;
+  readonly items: ReadonlyArray<PreparedPassphraseItem>;
+  readonly preparedSha256: string;
+}
+
+const PASSPHRASE_ITEM_DATA = new WeakMap<PreparedPassphraseItem, PreparedPassphraseItemData>();
+const PASSPHRASE_SEAL_DATA = new WeakMap<PreparedPassphraseSeal, PreparedPassphraseSealData>();
+
+/**
+ * One prepared passphrase item: the sealed form of one plaintext. Read-only;
+ * every byte-valued accessor returns a defensive copy.
+ */
+export class PreparedPassphraseItem {
+  constructor(guard: symbol) {
+    if (guard !== CONSTRUCT_GUARD) {
+      throw new TypeError(
+        'PreparedPassphraseItem cannot be constructed directly; it is produced by passphraseSealPrepare()',
+      );
+    }
+  }
+
+  private get data(): PreparedPassphraseItemData {
+    const data = PASSPHRASE_ITEM_DATA.get(this);
+    if (data === undefined) throw new TypeError('detached PreparedPassphraseItem');
+    return data;
+  }
+
+  /** The item's stable identity: lowercase-hex SHA-256 of its ciphertext blob. */
+  get itemId(): string {
+    return this.data.itemId;
+  }
+
+  /** The `commitment(32) || STREAM` ciphertext blob destined for storage (a copy). */
+  ciphertext(): Uint8Array {
+    return cloneBytes(this.data.ciphertext);
+  }
+
+  /**
+   * The item's content-hash map (algorithm identifier → digest bytes, keys in
+   * byte order). Digests are copies.
+   */
+  hashes(): Record<string, Uint8Array> {
+    const out: Record<string, Uint8Array> = {};
+    for (const [alg, digest] of this.data.hashes) out[alg] = cloneBytes(digest);
+    return out;
+  }
+}
+
+/** The phase-1 artifact of a passphrase seal: every item sealed, nothing uploaded. */
+export class PreparedPassphraseSeal {
+  constructor(guard: symbol) {
+    if (guard !== CONSTRUCT_GUARD) {
+      throw new TypeError(
+        'PreparedPassphraseSeal cannot be constructed directly; use passphraseSealPrepare()',
+      );
+    }
+  }
+
+  /** The prepared items, in input order. */
+  get items(): ReadonlyArray<PreparedPassphraseItem> {
+    return passphraseSealDataOf(this).items;
+  }
+
+  /**
+   * The lowercase-hex SHA-256 fingerprint over the prepared items — a stable
+   * identity for the whole prepared set that seeds the upload keys.
+   */
+  get preparedSha256(): string {
+    return passphraseSealDataOf(this).preparedSha256;
+  }
+
+  /**
+   * The deterministic idempotency key for the item's ciphertext upload:
+   * `"pwseal1-" + prepared_sha256[..32] + "-" + itemIndex`. Deriving the key
+   * from the artifact (not from upload-time randomness) lets a crash-and-retry
+   * replay the original upload instead of paying for a second one.
+   *
+   * Throws a `RangeError` when `itemIndex` is out of range for `items`.
+   */
+  uploadIdempotencyKey(itemIndex: number): string {
+    const data = passphraseSealDataOf(this);
+    if (!Number.isInteger(itemIndex) || itemIndex < 0 || itemIndex >= data.itemsData.length) {
+      throw new RangeError(
+        `itemIndex ${itemIndex} out of range for ${data.itemsData.length} prepared item(s)`,
+      );
+    }
+    const fingerprint = data.preparedSha256.slice(0, UPLOAD_KEY_FINGERPRINT_CHARS);
+    return `${PASSPHRASE_UPLOAD_KEY_PREFIX}${fingerprint}-${itemIndex}`;
+  }
+}
+
+function passphraseSealDataOf(prepared: PreparedPassphraseSeal): PreparedPassphraseSealData {
+  const data = PASSPHRASE_SEAL_DATA.get(prepared);
+  if (data === undefined) {
+    throw new TypeError(
+      'PreparedPassphraseSeal must come from passphraseSealPrepare() or passphraseSealPrepareWithRng()',
+    );
+  }
+  return data;
+}
+
+/** Build the facade pair over validated item data. */
+function newPreparedPassphraseSeal(
+  itemsData: ReadonlyArray<PreparedPassphraseItemData>,
+  preparedSha256: string,
+): PreparedPassphraseSeal {
+  const items = Object.freeze(
+    itemsData.map((data) => {
+      const item = new PreparedPassphraseItem(CONSTRUCT_GUARD);
+      PASSPHRASE_ITEM_DATA.set(item, data);
+      return item;
+    }),
+  );
+  const prepared = new PreparedPassphraseSeal(CONSTRUCT_GUARD);
+  PASSPHRASE_SEAL_DATA.set(prepared, { itemsData, items, preparedSha256 });
+  return prepared;
+}
+
+/**
+ * The lowercase-hex SHA-256 fingerprint over the prepared items: the domain tag
+ * followed by each item's `item_id` (a 64-char hex string, hashed as its ASCII
+ * bytes) in order. Each ciphertext (and thus its `item_id`) already binds the
+ * passphrase, salt, params, nonce, and hashes, so this is a complete content
+ * fingerprint of the prepared set.
+ */
+function passphraseFingerprint(itemsData: ReadonlyArray<PreparedPassphraseItemData>): string {
+  const parts: Uint8Array[] = [utf8Encoder.encode(PASSPHRASE_FINGERPRINT_DOMAIN)];
+  for (const item of itemsData) parts.push(utf8Encoder.encode(item.itemId));
+  let total = 0;
+  for (const part of parts) total += part.length;
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    buf.set(part, offset);
+    offset += part.length;
+  }
+  return bytesToHex(sha256(buf));
+}
+
+// =============================================================================
+// Phase 1 — passphraseSealPrepare
+// =============================================================================
+
+/**
+ * Seal every item under the shared passphrase, drawing every salt and nonce
+ * from the platform CSPRNG. Pure and offline: no I/O, no network.
+ *
+ * Rejects with `SealPrepareError` when the input carries no items or the
+ * cryptographic seal fails (a passphrase that normalizes to the empty string,
+ * below-floor Argon2id parameters, or an unavailable platform CSPRNG).
+ */
+export async function passphraseSealPrepare(
+  input: PassphraseSealPrepareInput,
+): Promise<PreparedPassphraseSeal> {
+  return preparePassphrase(input, undefined);
+}
+
+/**
+ * Deterministic twin of `passphraseSealPrepare` for known-answer tests: every
+ * salt and nonce is drawn from the caller-supplied `rng`, in item order (salt
+ * before nonce per item).
+ *
+ * SECURITY: `rng` carries the salt/nonce separation guarantee — a weak source
+ * yields predictable salts with no error. Production code calls
+ * `passphraseSealPrepare`, which pins the platform CSPRNG.
+ */
+export async function passphraseSealPrepareWithRng(
+  input: PassphraseSealPrepareInput,
+  rng: DeterministicRng,
+): Promise<PreparedPassphraseSeal> {
+  return preparePassphrase(input, rng);
+}
+
+/** The shared passphrase-prepare path: no `rng` sources secrets from the CSPRNG. */
+async function preparePassphrase(
+  input: PassphraseSealPrepareInput,
+  rng: DeterministicRng | undefined,
+): Promise<PreparedPassphraseSeal> {
+  if (input.items.length === 0) {
+    throw new SealPrepareError('NO_ITEMS', 'at least one item is required');
+  }
+  const hashAlgs = resolveHashAlgs(undefined, input.hashAlgs);
+  const params = input.params ?? DEFAULT_PASSPHRASE_KDF_PARAMS;
+
+  const itemsData: PreparedPassphraseItemData[] = [];
+  for (const item of input.items) {
+    const plaintext = toBytes(item.content);
+    // Every digest is bound into the in-ciphertext key commitment, so the
+    // envelope commits to exactly the `hashes` map this record will carry.
+    const hashes: Record<string, Uint8Array> = {};
+    const hashesMap = new Map<string, Uint8Array>();
+    for (const alg of hashAlgs) {
+      const digest = hashContent(plaintext, alg);
+      hashes[alg] = digest;
+      hashesMap.set(alg, digest);
+    }
+    // The deterministic path draws salt (16 bytes) then nonce (24 bytes) from
+    // the caller's rng and passes them; the secure path lets the crypto layer
+    // draw them and reads them back off the returned envelope.
+    let sealArgs: {
+      plaintext: Uint8Array;
+      hashes: Record<string, Uint8Array>;
+      passphrase: string;
+      params: PassphraseKdfParams;
+      salt?: Uint8Array;
+      nonce?: Uint8Array;
+    } = { plaintext, hashes, passphrase: input.passphrase, params };
+    if (rng !== undefined) {
+      const salt = new Uint8Array(PASSPHRASE_SALT_BYTES);
+      rng(salt);
+      const nonce = new Uint8Array(PASSPHRASE_NONCE_BYTES);
+      rng(nonce);
+      sealArgs = { ...sealArgs, salt, nonce };
+    }
+    let sealed: PassphraseSealedPoeOutput;
+    try {
+      sealed = await passphraseSealedPoeSeal(sealArgs);
+    } catch (error) {
+      throw new SealPrepareError(
+        'CRYPTO_FAILURE',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    itemsData.push({
+      itemId: bytesToHex(sha256(sealed.blob)),
+      ciphertext: sealed.blob,
+      hashes: hashesMap,
+      salt: sealed.envelope.passphrase.salt,
+      nonce: sealed.envelope.nonce,
+      params: sealed.envelope.passphrase.params,
+    });
+  }
+
+  return newPreparedPassphraseSeal(itemsData, passphraseFingerprint(itemsData));
+}
+
+// =============================================================================
+// Pure assembly seams
+// =============================================================================
+
+/** Lower one prepared passphrase item to the record `enc` shape. */
+function buildPassphraseEnvelope(item: PreparedPassphraseItemData): EncryptionEnvelope {
+  return {
+    scheme: 1,
+    aead: SEALED_POE_AEAD,
+    nonce: cloneBytes(item.nonce),
+    passphrase: {
+      alg: PASSPHRASE_KDF_ARGON2ID,
+      salt: cloneBytes(item.salt),
+      params: { m: item.params.m, t: item.params.t, p: item.params.p },
+    },
+  };
+}
+
+/**
+ * Assemble the Label 309 record from prepared passphrase material and the
+ * uploaded storage URIs.
+ *
+ * `uris` must carry exactly one storage URI per prepared item, in item order.
+ * `supersedes` is the 64-hex hash of the transaction this record replaces.
+ *
+ * Throws `SealPrepareError` with code `URI_COUNT_MISMATCH` on a wrong URI
+ * count, `INVALID_URI` on a malformed storage URI, and `INVALID_SUPERSEDES`
+ * on a malformed supersedes hash.
+ */
+export function passphraseSealedRecord(
+  prepared: PreparedPassphraseSeal,
+  uris: ReadonlyArray<string>,
+  supersedes?: string,
+): PoeRecord {
+  const data = passphraseSealDataOf(prepared);
+  if (uris.length !== data.itemsData.length) {
+    throw new SealPrepareError(
+      'URI_COUNT_MISMATCH',
+      `expected ${data.itemsData.length} storage uri(s), one per item, got ${uris.length}`,
+    );
+  }
+  validateAssembledUris(uris);
+  const supersedesBytes = supersedes === undefined ? undefined : parseSupersedesHex(supersedes);
+  const items = data.itemsData.map((item, index) => {
+    const hashes: Record<string, Uint8Array<ArrayBuffer>> = {};
+    for (const [alg, digest] of item.hashes) hashes[alg] = cloneBytes(digest);
+    return {
+      hashes,
+      uris: [uris[index]!],
+      enc: buildPassphraseEnvelope(item),
+    };
+  });
+  return {
+    v: 1,
+    items,
+    ...(supersedesBytes !== undefined ? { supersedes: supersedesBytes } : {}),
+  };
+}
+
+/**
+ * Canonical-bytes twin of `passphraseSealedRecord`: assemble and encode the
+ * record, attaching a path-1 COSE_Sign1 first when a signer is supplied.
+ */
+export async function encodePassphraseSealedRecord(
+  prepared: PreparedPassphraseSeal,
+  uris: ReadonlyArray<string>,
+  supersedes?: string,
+  signer?: Signer,
+): Promise<Uint8Array> {
+  if (signer !== undefined) assertSigner(signer);
+  const record = passphraseSealedRecord(prepared, uris, supersedes);
+  return encodeRecord(record, signer);
+}
+
+// =============================================================================
+// Quoting
+// =============================================================================
+
+/**
+ * The byte counts a prepared passphrase seal is priced against.
+ *
+ * Unlike the recipient path (whose slot count feeds a size estimate), a
+ * passphrase envelope is fixed-shape, so the record side is measured exactly:
+ * assemble the record over fixed-width `ar://` URI placeholders — plus a
+ * fixed-width path-1 signature placeholder when signed — and canonically encode
+ * it. A real `ar://` URI and a real path-1 COSE_Sign1 are both fixed-width, so
+ * the measured length is the exact published `record_bytes`.
+ */
+function passphraseQuoteInput(
+  prepared: PreparedPassphraseSeal,
+  signed: boolean,
+  supersedes: string | undefined,
+): QuoteInput {
+  const data = passphraseSealDataOf(prepared);
+  const placeholders = data.itemsData.map(() => arweaveUriPlaceholder());
+  const base = passphraseSealedRecord(prepared, placeholders, supersedes);
+  const record: PoeRecord = signed
+    ? { ...base, sigs: [{ cose_sign1: new Uint8Array(COSE_SIGN1_PATH1_BYTES) }] }
+    : base;
+  let fileBytesTotal = 0;
+  for (const item of data.itemsData) fileBytesTotal += item.ciphertext.length;
+  return {
+    recordBytes: encodePoeRecord(record).length,
+    recipientCount: 0,
+    fileBytesTotal,
+  };
+}
+
+/**
+ * Price a prepared passphrase seal without uploading anything — the preview UIs
+ * show before the user commits to storage.
+ */
+export async function quotePreparedPassphraseSeal(
+  config: ResolvedPublishConfig,
+  input: QuotePreparedPassphraseSealInput,
+): Promise<QuoteResponse> {
+  if (input.signer !== undefined) assertSigner(input.signer);
+  const quoteInput = passphraseQuoteInput(
+    input.prepared,
+    input.signer !== undefined,
+    input.supersedes,
+  );
+  return postQuote(config, quoteInput);
+}
+
+// =============================================================================
+// Phase 2 — submitPassphraseSealed
+// =============================================================================
+
+/**
+ * Submit a prepared passphrase seal: quote → price-cap check → per-item
+ * ciphertext upload (skipping items covered by validated receipts) → quote
+ * refresh if an upload outlived the price lock → encode (optionally sign) →
+ * publish.
+ *
+ * Rejects with `SubmitSealedError`; a failure after any upload completed
+ * carries the finished receipts for resume via
+ * `SubmitPassphraseSealedInput.uploaded`.
+ */
+export async function submitPassphraseSealed(
+  config: ResolvedPublishConfig,
+  input: SubmitPassphraseSealedInput,
+): Promise<SealedSubmission> {
+  const data = passphraseSealDataOf(input.prepared);
+
+  // Everything that can be validated without the network fails before the
+  // quote is spent: the signer shape, the supersedes format, the price cap's
+  // own format, the receipts.
+  let maxUsdMicros: bigint | undefined;
+  let resumed: Map<number, UploadReceipt>;
+  try {
+    if (input.signer !== undefined) assertSigner(input.signer);
+    if (input.supersedes !== undefined) parseSupersedesHex(input.supersedes);
+    maxUsdMicros = normalizeMaxUsdMicros(input.maxUsdMicros);
+    resumed = validateReceipts(data.itemsData, input.uploaded ?? []);
+  } catch (error) {
+    throw new SubmitSealedError([], error);
+  }
+
+  const quoteInput = passphraseQuoteInput(
+    input.prepared,
+    input.signer !== undefined,
+    input.supersedes,
+  );
+
+  let quote: QuoteResponse;
+  try {
+    quote =
+      input.quote !== undefined && quoteIsFresh(input.quote)
+        ? input.quote
+        : await postQuote(config, quoteInput);
+    enforceMaxUsdMicros(maxUsdMicros, quote);
+  } catch (error) {
+    throw new SubmitSealedError(receiptsInIndexOrder(resumed), error);
+  }
+
+  const uploads: UploadReceipt[] = [];
+  for (let index = 0; index < data.itemsData.length; index++) {
+    const item = data.itemsData[index]!;
+    const receipt = resumed.get(index);
+    if (receipt !== undefined) {
+      resumed.delete(index);
+      uploads.push(receipt);
+      continue;
+    }
+    const key = input.prepared.uploadIdempotencyKey(index);
+    try {
+      const uri = await uploadBlob(config, item.ciphertext, key, input.chunkBytes);
+      uploads.push({
+        itemId: item.itemId,
+        uri,
+        ciphertextSha256: cloneBytes(sha256(item.ciphertext)),
+        bytes: item.ciphertext.length,
+      });
+    } catch (error) {
+      uploads.push(...receiptsInIndexOrder(resumed));
+      throw new SubmitSealedError(uploads, error);
+    }
+  }
+
+  try {
+    quote = await refreshQuoteIfStale(config, quote, quoteInput, maxUsdMicros);
+
+    const uris = uploads.map((receipt) => receipt.uri);
+    const recordBytes = await encodePassphraseSealedRecord(
+      input.prepared,
+      uris,
+      input.supersedes,
+      input.signer,
+    );
+    const response = await postPublish(
+      config,
+      bytesToHex(recordBytes),
+      quote.quote_id,
+      input.idempotencyKey,
+    );
+    return { response, recordBytes, uris, uploads, quote };
+  } catch (error) {
+    throw new SubmitSealedError(uploads, error);
+  }
+}
+
+// =============================================================================
+// One-shot wrapper
+// =============================================================================
+
+/**
+ * One-shot passphrase publish: `passphraseSealPrepare` followed by
+ * `submitPassphraseSealed`.
+ *
+ * Rejects with `SubmitSealedError`; see `submitPassphraseSealed`.
+ */
+export async function publishPassphraseSealed(
+  config: ResolvedPublishConfig,
+  input: PublishPassphraseSealedInput,
+): Promise<SealedSubmission> {
+  let prepared: PreparedPassphraseSeal;
+  try {
+    prepared = await passphraseSealPrepare({
+      items: input.items,
+      passphrase: input.passphrase,
+      ...(input.hashAlgs !== undefined ? { hashAlgs: input.hashAlgs } : {}),
+      ...(input.params !== undefined ? { params: input.params } : {}),
+    });
+  } catch (error) {
+    throw new SubmitSealedError([], error);
+  }
+  return submitPassphraseSealed(config, {
     prepared,
     ...(input.signer !== undefined ? { signer: input.signer } : {}),
     ...(input.maxUsdMicros !== undefined ? { maxUsdMicros: input.maxUsdMicros } : {}),

@@ -86,12 +86,39 @@ export function signerFromSeed(seed: Uint8Array): Signer {
 // single active identity contributes a one-element X25519 private-key chain and
 // a one-element X-Wing secret-seed list; the unwrap dispatch selects the right
 // list from `envelope.kem`.
+//
+// The bundle holds recipient private keys — the material a sealed record is
+// decrypted with — so the SDK-produced bundle self-redacts: `toString`,
+// `console.log` (Node inspect), and `JSON.stringify` all render a
+// count-only summary and never the key bytes. Field access
+// (`bundle.x25519PrivateKeys`) is unaffected, so the unwrap dispatch reads the
+// keys normally; only the string forms are redacted, so a stray log line, an
+// error chain, or a serialized dump can never surface the secret.
 export function recipientKeyBundleFromSeed(seed: Uint8Array): RecipientKeyBundle {
   const keys = deriveKeysFromSeed(seed);
-  return {
-    x25519PrivateKeys: [keys.x25519.secretKey],
-    mlkem768x25519SecretSeeds: [keys.mlkem768x25519.secretSeed],
-  };
+  return redactRecipientKeyBundle([keys.x25519.secretKey], [keys.mlkem768x25519.secretSeed]);
+}
+
+/**
+ * Wrap the two secret-key lists in a `RecipientKeyBundle` whose every string
+ * form redacts the key bytes while keeping the list counts observable (a bundle
+ * stays useful to log). Field access is untouched; only `toString` / Node
+ * inspect / `JSON.stringify` are intercepted.
+ */
+function redactRecipientKeyBundle(
+  x25519PrivateKeys: ReadonlyArray<Uint8Array>,
+  mlkem768x25519SecretSeeds: ReadonlyArray<Uint8Array>,
+): RecipientKeyBundle {
+  const summary = (): string =>
+    `RecipientKeyBundle { x25519PrivateKeys: <redacted ${x25519PrivateKeys.length} key(s)>, ` +
+    `mlkem768x25519SecretSeeds: <redacted ${mlkem768x25519SecretSeeds.length} seed(s)> }`;
+  const bundle: RecipientKeyBundle = { x25519PrivateKeys, mlkem768x25519SecretSeeds };
+  Object.defineProperties(bundle, {
+    toString: { value: summary, enumerable: false },
+    toJSON: { value: summary, enumerable: false },
+    [Symbol.for('nodejs.util.inspect.custom')]: { value: summary, enumerable: false },
+  });
+  return bundle;
 }
 
 export interface DecryptSealedFromSeedArgs {

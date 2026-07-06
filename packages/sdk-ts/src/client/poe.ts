@@ -26,12 +26,18 @@ import {
 } from './publish';
 import {
   publishSealed as publishSealedImpl,
+  publishPassphraseSealed as publishPassphraseSealedImpl,
   quotePreparedSeal as quotePreparedSealImpl,
+  quotePreparedPassphraseSeal as quotePreparedPassphraseSealImpl,
   submitSealed as submitSealedImpl,
+  submitPassphraseSealed as submitPassphraseSealedImpl,
   type PublishSealedInput,
+  type PublishPassphraseSealedInput,
   type QuotePreparedSealInput,
+  type QuotePreparedPassphraseSealInput,
   type SealedSubmission,
   type SubmitSealedInput,
+  type SubmitPassphraseSealedInput,
 } from './sealed';
 import {
   abandonUploadSession as abandonUploadSessionImpl,
@@ -376,6 +382,40 @@ export class PoeNamespace {
    */
   async publishSealed(input: PublishSealedInput): Promise<SealedSubmission> {
     return publishSealedImpl(this.config as ResolvedPublishConfig, input);
+  }
+
+  /**
+   * Price a prepared passphrase seal without uploading anything — the
+   * passphrase-path twin of `quotePreparedSeal`. The returned quote may later
+   * be passed to `submitPassphraseSealed` as its optional price lock.
+   */
+  async quotePreparedPassphraseSeal(
+    input: QuotePreparedPassphraseSealInput,
+  ): Promise<QuoteResponse> {
+    return quotePreparedPassphraseSealImpl(this.config as ResolvedPublishConfig, input);
+  }
+
+  /**
+   * Phase 2 of the passphrase-sealed flow: submit a `PreparedPassphraseSeal`
+   * produced by `passphraseSealPrepare` — internal exact-size quote, price-cap
+   * check, per-item ciphertext uploads under deterministic idempotency keys,
+   * quote refresh when an upload outlived the price lock, encode (optionally
+   * sign), and publish. Rejects with `SubmitSealedError` carrying the completed
+   * `UploadReceipt`s, so a retry resumes without re-paying storage.
+   */
+  async submitPassphraseSealed(input: SubmitPassphraseSealedInput): Promise<SealedSubmission> {
+    return submitPassphraseSealedImpl(this.config as ResolvedPublishConfig, input);
+  }
+
+  /**
+   * One-shot passphrase-sealed publish: seal every item under the shared
+   * passphrase (Argon2id-stretched content key, no per-recipient KEM slots),
+   * then run the full `submitPassphraseSealed` flow — internal quote, uploads,
+   * publish. Flows that must survive a crash use the two-phase
+   * `passphraseSealPrepare` + `submitPassphraseSealed` pair instead.
+   */
+  async publishPassphraseSealed(input: PublishPassphraseSealedInput): Promise<SealedSubmission> {
+    return publishPassphraseSealedImpl(this.config as ResolvedPublishConfig, input);
   }
 
   /**

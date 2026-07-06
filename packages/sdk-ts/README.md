@@ -1,6 +1,6 @@
 # @cardanowall/sdk-ts — the TypeScript SDK for Label 309 Proof-of-Existence
 
-The browser + Node TypeScript SDK for [Label 309](https://cips.cardano.org/) Proof-of-Existence on Cardano: a **standalone verifier** (three roles), a **gateway-agnostic HTTP client**, **off-host signing** helpers, and **seed-derived identity** helpers.
+The browser + Node TypeScript SDK for [Label 309](https://github.com/cardanowall/label-309) Proof-of-Existence on Cardano: a **standalone verifier** (three roles), a **gateway-agnostic HTTP client**, **off-host signing** helpers, and **seed-derived identity** helpers.
 
 ## What it is
 
@@ -33,12 +33,12 @@ const report = await verifyTx({
   cardanoGatewayChain: ['https://api.koios.rest/api/v1'], // tried in order
 });
 
-console.log(report.verdict); // 'valid' | 'pending' | 'failed'
+console.log(report.verdict); // 'valid' | 'pending' | 'unverifiable' | 'failed'
 console.log(report.exit_code); // 0 valid · 1 integrity fail · 2 network fail · 3 pending
 console.log(report.record); // the decoded Label 309 PoeRecord
 ```
 
-To decrypt a sealed PoE addressed to you, run at the **recipient-sealed** profile and supply your X25519 private key per item index:
+To decrypt a sealed PoE addressed to you, run at the **recipient-sealed** profile and supply your X25519 private key. The keyring is global to the run — each credential is tried against every sealed item, so there is no per-item index:
 
 ```ts
 const report = await verifyTx({
@@ -46,7 +46,7 @@ const report = await verifyTx({
   cardanoGatewayChain: ['https://api.koios.rest/api/v1'],
   arweaveGatewayChain: ['https://arweave.net'],
   profile: 'recipient-sealed',
-  decryption: [{ itemIndex: 0, recipientSecretKey: myX25519SecretKey }],
+  decryption: [{ recipientSecretKey: myX25519SecretKey }],
 });
 // report.item_decryptions[0].verdict === 'decrypted'
 // report.item_decryptions[0].plaintext_hash_ok === true
@@ -93,7 +93,7 @@ const result = await client.poe.publishContent({
 console.log(result.id, result.status, result.balance_after_usd_micros);
 ```
 
-`client.poe` also exposes `publishPrehashed`, the low-level `uploads` / `publish` / `publishBatch`, and `quote`. `client.records.list({ sealed: true })` pages through the sealed records addressed to the authenticated account (the gateway resolves "addressed to me" from the bearer identity).
+`publishContent` / `publishPrehashed` also co-hash the content under several algorithms (`hashAlgs: ['sha2-256', 'blake2b-256']`, bound into one item) and accept optional `uris` (already-pinned `ar://` / `ipfs://` content mirrors) and a `supersedes` link to an earlier record. `client.poe` further exposes the low-level `uploads` / `publish` / `publishBatch`, and `quote`. `client.records.list({ sealed: true })` pages through the sealed records addressed to the authenticated account (the gateway resolves "addressed to me" from the bearer identity).
 
 The priced helpers quote internally, so they take a `maxUsdMicros` price cap instead of a `quoteId`. `publishMerkle({ leaves, leafAlg?, maxUsdMicros?, signer? })` commits N leaf hashes under one RFC 9162 root and returns the exact published `recordBytes`. The sealed flow is two-phase, so a failed publish never re-encrypts or re-pays storage:
 
@@ -134,6 +134,22 @@ console.log(submission.response.id, submission.uris, submission.recordBytes);
 ```
 
 `client.poe.publishSealed({ items, recipients, ... })` is the one-shot form of the same flow (prepare + submit in one call) for flows that need no crash resume.
+
+To deliver to someone who has no Label 309 identity, seal to a **shared passphrase** instead of recipient keys — anyone who knows it opens the record, with no delivery address involved. The passphrase surface mirrors the recipient one: two-phase `passphraseSealPrepare` + `submitPassphraseSealed` (with `quotePreparedPassphraseSeal` for a preview and `UploadReceipt` resume), plus a one-shot wrapper. Read the passphrase from the environment or a prompt, never a source-embedded literal:
+
+```ts
+const passphrase = process.env.SEAL_PASSPHRASE!;
+
+const submission = await client.poe.publishPassphraseSealed({
+  items: [{ content: fileBytes }],
+  passphrase,
+  hashAlgs: ['sha2-256', 'blake2b-256'], // co-hash the item under both algorithms
+  maxUsdMicros: 500_000n, // refuse to spend more than $0.50
+});
+console.log(submission.response.id, submission.uris);
+```
+
+A recipient opens it by passing the passphrase to `verifyTx` — a `{ passphrase }` entry in `decryption` joins the same keyring as any recipient key and is tried against every sealed item.
 
 ### Sign off-host (key never enters the SDK)
 
@@ -191,8 +207,8 @@ Everything is reachable from the package root; submodule entry points (`/verifie
 **Client** (`/client`)
 
 - `Label309Client({ baseUrl, apiKey?, fetch? })` — `baseUrl` required, key opaque.
-- `client.poe.{quote, publishContent, publishPrehashed, quotePreparedSeal, submitSealed, publishSealed, publishMerkle, uploads, publish, publishBatch}`.
-- Two-phase sealed publishing: `sealPrepare`, `preparedSealToJson` / `preparedSealFromJson` (the portable `prepared_seal_json_v1` artifact), `sealedRecord` / `encodeSealedRecord` (air-gap assembly seams), plus `UploadReceipt`-carrying errors (`SubmitSealedError`).
+- `client.poe.{quote, publishContent, publishPrehashed, quotePreparedSeal, submitSealed, publishSealed, quotePreparedPassphraseSeal, submitPassphraseSealed, publishPassphraseSealed, publishMerkle, uploads, publish, publishBatch}`. `publishContent` co-hashes via `hashAlgs` and accepts `uris` + `supersedes`.
+- Two-phase sealed publishing: `sealPrepare` (to recipients) / `passphraseSealPrepare` (to a shared passphrase), `preparedSealToJson` / `preparedSealFromJson` (the portable `prepared_seal_json_v1` artifact), `sealedRecord` / `encodeSealedRecord` (air-gap assembly seams), plus `UploadReceipt`-carrying errors (`SubmitSealedError`).
 - `client.records.{list, count, get}`, `client.account.balance()`. Sealed records addressed to the caller come from `client.records.list({ sealed: true })` — there is no server-side verify endpoint, so a verdict always runs through the standalone verifier.
 - Off-host signing: `prepareSigStructure`, `assembleCoseSign1`, plus the CIP-8 hashed-mode pair `prepareSigStructureHashed` / `assembleCoseSign1Hashed`.
 - HTTP errors extending `Label309HttpError`: `InsufficientFundsError`, `QuoteExpiredError`, `QuoteAlreadyConsumedError`, `ServiceUnavailableError` (503, e.g. no FX snapshot yet — retryable), `RateLimitedError`, `UnauthorizedError`, `ValidationFailedError`, `MalformedCborError`, and more. Client-side errors extend plain `Error`: `InvalidClientConfigError` (bad config) and `MaxUsdExceededError` (a quote exceeded the `maxUsdMicros` cap).

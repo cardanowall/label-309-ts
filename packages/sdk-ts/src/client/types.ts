@@ -774,8 +774,26 @@ export interface PublishContentInput {
   readonly content: Uint8Array | string;
   /** UUID returned by POST /poe/quote. */
   readonly quoteId: string;
-  /** Hash algorithm registered in the Label 309 hash registry. */
+  /**
+   * Primary hash algorithm registered in the Label 309 hash registry. Unioned
+   * with `hashAlgs` (dedup, first-seen order); defaults to `sha2-256`.
+   */
   readonly hashAlg?: SupportedHashAlg;
+  /**
+   * Additional co-hash algorithms bound alongside `hashAlg`. Each contributes
+   * one more `hashes` entry over the same content, so a verifier can check the
+   * claim under any supported digest. Unioned with `hashAlg` (dedup); an empty
+   * list plus no `hashAlg` defaults to a single `sha2-256` entry.
+   */
+  readonly hashAlgs?: readonly SupportedHashAlg[];
+  /**
+   * Off-chain content-discovery URIs to attach to the item (the public
+   * `{ar://, ipfs://}` fetch set). Validated against the same strict grammar
+   * the canonical record validator enforces.
+   */
+  readonly uris?: readonly string[];
+  /** The 64-hex transaction hash of the record this one supersedes. */
+  readonly supersedes?: string;
   /** Optional signer — when omitted the record publishes unsigned (profile=core). */
   readonly signer?: Signer;
   readonly idempotencyKey?: string;
@@ -793,6 +811,14 @@ export interface PublishPrehashedInput {
   readonly hashes: Partial<Record<SupportedHashAlg, string>>;
   /** UUID returned by POST /poe/quote. */
   readonly quoteId: string;
+  /**
+   * Off-chain content-discovery URIs to attach to the item (the public
+   * `{ar://, ipfs://}` fetch set). Validated against the same strict grammar
+   * the canonical record validator enforces.
+   */
+  readonly uris?: readonly string[];
+  /** The 64-hex transaction hash of the record this one supersedes. */
+  readonly supersedes?: string;
   readonly signer?: Signer;
   readonly idempotencyKey?: string;
 }
@@ -814,6 +840,8 @@ export interface PublishMerkleInput {
    * such claim (pass-through digests computed elsewhere).
    */
   readonly leafAlg?: string;
+  /** The 64-hex transaction hash of the record this batch supersedes. */
+  readonly supersedes?: string;
   readonly signer?: Signer;
   /**
    * Refuse to publish when the quoted price exceeds this many USD micro-cents

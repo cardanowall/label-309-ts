@@ -33,7 +33,12 @@ import {
   MERKLE_ALG_ID,
 } from '@cardanowall/crypto-core/hash';
 import { encodeLeavesList } from '@cardanowall/crypto-core/merkle';
-import { encodePoeRecord, type MerkleCommit, type PoeRecord } from '@cardanowall/poe-standard';
+import {
+  encodePoeRecord,
+  isFetchSetUri,
+  type MerkleCommit,
+  type PoeRecord,
+} from '@cardanowall/poe-standard';
 
 import { estimateRecordBytes, type RecordShape } from '../estimate/index';
 import { MaxUsdExceededError } from './max-usd-exceeded-error';
@@ -92,13 +97,68 @@ export class PublishError extends Error {
     | 'INVALID_RECIPIENT'
     | 'UNSUPPORTED_HASH_ALG'
     | 'INVALID_MAX_USD'
-    | 'INVALID_QUOTE_AMOUNT';
+    | 'INVALID_QUOTE_AMOUNT'
+    | 'INVALID_SUPERSEDES'
+    | 'INVALID_URI';
 
   constructor(code: PublishError['code'], message: string) {
     super(message);
     this.name = 'PublishError';
     this.code = code;
   }
+}
+
+// The transaction-hash width `supersedes` carries as lowercase hex.
+const SUPERSEDES_HEX_LENGTH = 64;
+
+/**
+ * Resolve the effective co-hash algorithm set from a primary choice plus any
+ * extra algorithms: the union in first-seen order, deduplicated by wire id,
+ * defaulting to a single `sha2-256` when both are empty. A single algorithm
+ * therefore encodes identically to the pre-co-hash behaviour.
+ */
+export function resolveHashAlgs(
+  primary: SupportedHashAlg | undefined,
+  extra: readonly SupportedHashAlg[] | undefined,
+): SupportedHashAlg[] {
+  const out: SupportedHashAlg[] = [];
+  for (const alg of [...(primary !== undefined ? [primary] : []), ...(extra ?? [])]) {
+    if (!out.includes(alg)) out.push(alg);
+  }
+  if (out.length === 0) out.push('sha2-256');
+  return out;
+}
+
+/**
+ * Parse an optional `supersedes` value into the 32-byte transaction hash the
+ * record carries, or `undefined` when none was supplied. Shared by every
+ * producer path so `supersedes` validation is identical across the SDK.
+ * Rejects anything that is not exactly 64 hex characters with
+ * `INVALID_SUPERSEDES`.
+ */
+export function resolveSupersedes(value: string | undefined): Uint8Array<ArrayBuffer> | undefined {
+  if (value === undefined) return undefined;
+  if (value.length !== SUPERSEDES_HEX_LENGTH || !/^[0-9a-fA-F]+$/.test(value)) {
+    throw new PublishError('INVALID_SUPERSEDES', 'supersedes must be the 64-hex transaction hash');
+  }
+  return cloneToOwnedBuffer(hexToBytes(value, 'INVALID_SUPERSEDES'));
+}
+
+/**
+ * Validate an optional content-discovery URI list against the fetch set,
+ * returning a fresh array when every entry is well-formed or `undefined` when
+ * none was supplied. The per-URI grammar is the SAME strict `isFetchSetUri`
+ * the canonical record validator enforces, so a producer can never emit a
+ * record a verifier would reject on its content URIs.
+ */
+export function validateFetchSetUris(uris: readonly string[] | undefined): string[] | undefined {
+  if (uris === undefined) return undefined;
+  for (const uri of uris) {
+    if (!isFetchSetUri(uri)) {
+      throw new PublishError('INVALID_URI', `${uri} is not a valid ar:// or ipfs:// fetch-set uri`);
+    }
+  }
+  return [...uris];
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -459,13 +519,21 @@ export async function publishContent(
   input: PublishContentInput,
 ): Promise<PublishResponse> {
   if (input.signer !== undefined) assertSigner(input.signer);
-  const hashAlg: SupportedHashAlg = input.hashAlg ?? 'sha2-256';
+  const uris = validateFetchSetUris(input.uris);
+  const supersedes = resolveSupersedes(input.supersedes);
   const contentBytes = toBytes(input.content);
-  const digest = hashContent(contentBytes, hashAlg);
+  // The primary `hashAlg` and any repeatable `hashAlgs` union into the item's
+  // co-hash set (dedup, default `sha2-256`); a single algorithm co-hashes
+  // exactly one entry and encodes identically to the pre-co-hash behaviour.
+  const hashes: Record<string, Uint8Array<ArrayBuffer>> = {};
+  for (const alg of resolveHashAlgs(input.hashAlg, input.hashAlgs)) {
+    hashes[alg] = hashContent(contentBytes, alg);
+  }
 
   const record: PoeRecord = {
     v: 1,
-    items: [{ hashes: { [hashAlg]: digest } }],
+    items: [{ hashes, ...(uris !== undefined ? { uris } : {}) }],
+    ...(supersedes !== undefined ? { supersedes } : {}),
   };
   const recordBytes = await encodeRecord(record, input.signer);
   return postPublish(config, bytesToHex(recordBytes), input.quoteId, input.idempotencyKey);
@@ -489,6 +557,8 @@ export async function publishPrehashed(
   input: PublishPrehashedInput,
 ): Promise<PublishResponse> {
   if (input.signer !== undefined) assertSigner(input.signer);
+  const uris = validateFetchSetUris(input.uris);
+  const supersedes = resolveSupersedes(input.supersedes);
   const entries = Object.entries(input.hashes) as Array<[SupportedHashAlg, string | undefined]>;
   const present = entries.filter(([, hex]) => typeof hex === 'string' && hex.length > 0) as Array<
     [SupportedHashAlg, string]
@@ -520,7 +590,8 @@ export async function publishPrehashed(
 
   const record: PoeRecord = {
     v: 1,
-    items: [{ hashes: decoded }],
+    items: [{ hashes: decoded, ...(uris !== undefined ? { uris } : {}) }],
+    ...(supersedes !== undefined ? { supersedes } : {}),
   };
   const recordBytes = await encodeRecord(record, input.signer);
   return postPublish(config, bytesToHex(recordBytes), input.quoteId, input.idempotencyKey);
@@ -569,6 +640,7 @@ export async function publishMerkle(
   if (input.leaves.length < 1) {
     throw new PublishError('INVALID_LEAVES', 'publishMerkle requires at least one leaf hash');
   }
+  const supersedes = resolveSupersedes(input.supersedes);
   const maxUsdMicros = normalizeMaxUsdMicros(input.maxUsdMicros);
 
   const leaves: Uint8Array[] = input.leaves.map((leaf, idx) => {
@@ -594,7 +666,7 @@ export async function publishMerkle(
   // leaves-list byte count.
   const shape: RecordShape = {
     signed: input.signer !== undefined,
-    supersedes: false,
+    supersedes: supersedes !== undefined,
     merkle: { alg: MERKLE_ALG_ID, uris: [arweaveUriPlaceholder()] },
   };
   const quoteInput: QuoteInput = {
@@ -621,7 +693,11 @@ export async function publishMerkle(
     leaf_count: leaves.length,
     uris: [uri],
   };
-  const record: PoeRecord = { v: 1, merkle: [merkleEntry] };
+  const record: PoeRecord = {
+    v: 1,
+    merkle: [merkleEntry],
+    ...(supersedes !== undefined ? { supersedes } : {}),
+  };
   const recordBytes = await encodeRecord(record, input.signer);
   const published = await postPublish(
     config,

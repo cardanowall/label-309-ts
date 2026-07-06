@@ -68,6 +68,9 @@ export {
 export {
   validatePoeRecord,
   validateCidProfile,
+  fetchSetUriRejection,
+  isFetchSetUri,
+  isArweaveTxUri,
   DEFAULT_PASSPHRASE_PARAMS_CEILING,
   type ValidationResult,
   type ValidationIssue,

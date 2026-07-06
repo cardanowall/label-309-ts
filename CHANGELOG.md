@@ -9,6 +9,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 > release. Pre-1.0 versions do not carry the stability guarantees of
 > [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-07-06
+
+### Added
+
+- `sdk-ts`: passphrase two-phase sealed publishing on a dedicated surface — `passphraseSealPrepare` then `submitPassphraseSealed` (or the one-shot `publishPassphraseSealed`). Every item's content-encryption key is wrapped by an Argon2id-derived key (`PassphraseKdfParams`, `DEFAULT_PASSPHRASE_KDF_PARAMS = { m: 65536, t: 3, p: 4 }`) so anyone holding the passphrase can open the record. `quotePreparedPassphraseSeal`, `passphraseSealedRecord`, and `encodePassphraseSealedRecord` give the passphrase path the same quote-preview / offline-prepare / air-gap seams as the recipient path.
+- `sdk-ts`: co-hash support. `resolveHashAlgs` accepts a plural set of hash algorithms so a prepared, content, or pre-hashed input can commit to the same content under more than one digest; the item record lists every co-hash. Sealed prepare accepts the same multi-hash set.
+- `sdk-ts`: plural `uris` and `supersedes` on content and pre-hashed inputs (`resolveSupersedes`, `validateFetchSetUris`), mirroring the fields already available on the sealed and Merkle inputs.
+
+### Changed
+
+- `sdk-ts`: secret-bearing values now self-redact. A `RecipientKeyBundle` and the prepared-seal secrets render a count-only summary through `toString`, `JSON.stringify`, and Node's `util.inspect`, so a stray log line, a serialized error, or an interpolated string can no longer leak a recipient private key or a sealed plaintext; field access is untouched. Mirrors the Rust SDK's redacting `Debug`.
+- `poe-standard`: the structural validator accepts co-hash item records (an item carrying more than one hash of the same content), and the fetch-set URI predicates (`isFetchSetUri`, `isArweaveTxUri`, `fetchSetUriRejection`) are exported so the SDKs and CLI share one URI-validation source.
+- `crypto-core`: released with the coordinated 0.11.0 SDK minor; no functional changes.
+
 ## [0.10.0] - 2026-07-05
 
 ### Breaking

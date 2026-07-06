@@ -584,19 +584,32 @@ function checkOneUri(
   path: ReadonlyArray<string | number>,
   issues: ValidationIssue[],
 ): void {
+  const rejection = fetchSetUriRejection(uri);
+  if (rejection !== null) issues.push(issueOf('INVALID_URI', path, rejection));
+}
+
+/** Whether `body` is a valid Arweave transaction id: exactly 43 unpadded
+ * base64url characters (`[A-Za-z0-9_-]`). */
+function isArweaveTxid(body: string): boolean {
+  return /^[A-Za-z0-9_-]{43}$/.test(body);
+}
+
+/**
+ * The single grammar for a record fetch-set URI. Returns `null` when `uri` is a
+ * well-formed member of the v1 fetch set (`ar://` / `ipfs://`), or the exact
+ * rejection reason otherwise. The canonical record validator (`checkOneUri`)
+ * AND every producer-side pre-check (`isFetchSetUri`) delegate here, so a
+ * producer can never emit a URI a downstream verifier would reject — the early
+ * check and the canonical check are literally the same function.
+ */
+export function fetchSetUriRejection(uri: string): string | null {
   // Absolute URI, no fragment, scheme in `{ar://, ipfs://}`.
   if (uri.includes('#')) {
-    issues.push(
-      issueOf('INVALID_URI', path, "URI contains a fragment identifier ('#'), which is forbidden"),
-    );
-    return;
+    return "URI contains a fragment identifier ('#'), which is forbidden";
   }
   const sepIdx = uri.indexOf('://');
   if (sepIdx <= 0 || !/^[a-z][a-z0-9+.-]*$/i.test(uri.slice(0, sepIdx))) {
-    issues.push(
-      issueOf('INVALID_URI', path, 'URI is not absolute (missing scheme://hierarchical-part)'),
-    );
-    return;
+    return 'URI is not absolute (missing scheme://hierarchical-part)';
   }
   // RFC 3986 §3.1: the scheme is case-insensitive, so case-fold the SCHEME
   // ONLY, then ALWAYS validate the body. The body is matched verbatim — a
@@ -604,31 +617,44 @@ function checkOneUri(
   const scheme = uri.slice(0, sepIdx).toLowerCase();
   const rest = uri.slice(sepIdx + '://'.length);
   if (scheme === 'ar') {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(rest)) {
-      issues.push(
-        issueOf(
-          'INVALID_URI',
-          path,
-          'ar:// URI does not match `^ar://[A-Za-z0-9_-]{43}$` (43-char base64url txid, no path/query/fragment)',
-        ),
-      );
-    }
-    return;
+    return isArweaveTxid(rest)
+      ? null
+      : 'ar:// URI does not match `^ar://[A-Za-z0-9_-]{43}$` (43-char base64url txid, no path/query/fragment)';
   }
   if (scheme === 'ipfs') {
     // Full offline CID parse (not a prefix heuristic).
     const slashIdx = rest.indexOf('/');
     const cid = slashIdx === -1 ? rest : rest.slice(0, slashIdx);
-    if (!validateCidProfile(cid)) {
-      issues.push(
-        issueOf('INVALID_URI', path, 'ipfs:// URI is not a valid CID under the Label 309 profile'),
-      );
-    }
-    return;
+    return validateCidProfile(cid)
+      ? null
+      : 'ipfs:// URI is not a valid CID under the Label 309 profile';
   }
-  issues.push(
-    issueOf('INVALID_URI', path, 'unsupported URI scheme; v1 PoE URI set is {ar://, ipfs://}'),
-  );
+  return 'unsupported URI scheme; v1 PoE URI set is {ar://, ipfs://}';
+}
+
+/**
+ * Whether `uri` is a well-formed member of a record's fetch set under the
+ * strict Label 309 grammar (see {@link fetchSetUriRejection}). Producer helpers
+ * call this to reject a malformed content or mirror URI early, using the exact
+ * grammar the canonical record validator enforces.
+ */
+export function isFetchSetUri(uri: string): boolean {
+  return fetchSetUriRejection(uri) === null;
+}
+
+/**
+ * Whether `uri` is an absolute Arweave transaction URI: `ar://` followed by a
+ * valid 43-character base64url txid, with no fragment, path, or query.
+ *
+ * This is the exact form a sealed-ciphertext upload receipt carries — the
+ * gateway is the only Arweave writer and every sealed ciphertext is stored on
+ * Arweave — so the sealed submit path constrains resume-receipt URIs to it. A
+ * URI accepted here is always a valid fetch-set member (so the assembled record
+ * still passes canonical validation), and its encoded width is fixed at `5 + 43`
+ * bytes, which is what keeps the pre-upload exact-size quote exact.
+ */
+export function isArweaveTxUri(uri: string): boolean {
+  return uri.startsWith('ar://') && isArweaveTxid(uri.slice('ar://'.length));
 }
 
 // =============================================================================

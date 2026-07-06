@@ -4,6 +4,10 @@
 // bytes a deterministic `sealPrepare` run produces. The Rust and Python SDKs
 // assert byte-identical values from mirrored copies of the same fixtures, so
 // the portable artifact cannot drift between implementations.
+//
+// The vector set spans both the recipient path (a portable `prepared_seal_json`
+// plus co-hash under `hash_algs`) and the passphrase path (no portable form —
+// the vector pins only the derived values a `passphraseSealPrepare` reproduces).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,18 +23,23 @@ import {
 
 import { bytesToHex } from '../hex';
 import {
+  encodePassphraseSealedRecord,
   encodeSealedRecord,
+  passphraseSealPrepareWithRng,
   preparedSealFromJson,
   preparedSealToJson,
   sealPrepareWithRng,
   type DeterministicRng,
+  type PassphraseKdfParams,
 } from './sealed';
+import type { SupportedHashAlg } from './types';
 
 interface PreparedSealVector {
   readonly description: string;
   readonly deterministic_rng: { readonly type: string; readonly start: number };
   readonly kem: 'x25519' | 'mlkem768x25519';
-  readonly hash_alg: string;
+  readonly hash_alg?: string;
+  readonly hash_algs?: readonly string[];
   readonly recipient_seeds_hex: readonly string[];
   readonly recipient_public_keys_hex: readonly string[];
   readonly plaintexts_hex: readonly string[];
@@ -46,11 +55,30 @@ interface PreparedSealVector {
   };
 }
 
+interface PassphraseSealVector {
+  readonly description: string;
+  readonly deterministic_rng: { readonly type: string; readonly start: number };
+  readonly hash_alg?: string;
+  readonly hash_algs?: readonly string[];
+  readonly params: { readonly m: number; readonly t: number; readonly p: number };
+  readonly passphrase: string;
+  readonly plaintexts_hex: readonly string[];
+  readonly uris: readonly string[];
+  readonly supersedes: null;
+  readonly signers: null;
+  readonly expected: {
+    readonly prepared_sha256: string;
+    readonly item_ids: readonly string[];
+    readonly upload_idempotency_keys: readonly string[];
+    readonly record_hex: string;
+  };
+}
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(here, '../../tests/fixtures/prepared-seal');
 
-function loadVector(name: string): PreparedSealVector {
-  return JSON.parse(fs.readFileSync(path.join(fixturesDir, name), 'utf8')) as PreparedSealVector;
+function loadVector<T>(name: string): T {
+  return JSON.parse(fs.readFileSync(path.join(fixturesDir, name), 'utf8')) as T;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -73,10 +101,18 @@ function counterRng(start: number): DeterministicRng {
   };
 }
 
+/** The declared hash-alg set: the plural `hash_algs`, else the singular `hash_alg`. */
+function hashAlgsOf(vector: {
+  readonly hash_alg?: string;
+  readonly hash_algs?: readonly string[];
+}): SupportedHashAlg[] {
+  const algs = vector.hash_algs ?? (vector.hash_alg !== undefined ? [vector.hash_alg] : []);
+  return algs as SupportedHashAlg[];
+}
+
 async function runVector(name: string): Promise<void> {
-  const vector = loadVector(name);
+  const vector = loadVector<PreparedSealVector>(name);
   expect(vector.deterministic_rng.type).toBe('counter-u8');
-  expect(vector.hash_alg).toBe('sha2-256');
 
   // Recipient keys derive from the pinned seeds — both are in the fixture so
   // a twin without the derivation helpers can use the keys directly.
@@ -93,6 +129,7 @@ async function runVector(name: string): Promise<void> {
       items: vector.plaintexts_hex.map((hex) => ({ content: hexToBytes(hex) })),
       recipients,
       kem: vector.kem,
+      hashAlgs: hashAlgsOf(vector),
     },
     counterRng(vector.deterministic_rng.start),
   );
@@ -120,6 +157,39 @@ async function runVector(name: string): Promise<void> {
   );
 }
 
+async function runPassphraseVector(name: string): Promise<void> {
+  const vector = loadVector<PassphraseSealVector>(name);
+  expect(vector.deterministic_rng.type).toBe('counter-u8');
+  const params: PassphraseKdfParams = {
+    m: vector.params.m,
+    t: vector.params.t,
+    p: vector.params.p,
+  };
+
+  const prepared = await passphraseSealPrepareWithRng(
+    {
+      items: vector.plaintexts_hex.map((hex) => ({ content: hexToBytes(hex) })),
+      passphrase: vector.passphrase,
+      hashAlgs: hashAlgsOf(vector),
+      params,
+    },
+    counterRng(vector.deterministic_rng.start),
+  );
+
+  // The passphrase artifact has no portable `to_json` form, so the vector pins
+  // the byte-deterministic derivations directly.
+  expect(prepared.preparedSha256).toBe(vector.expected.prepared_sha256);
+  expect(prepared.items.map((item) => item.itemId)).toEqual([...vector.expected.item_ids]);
+  expect(prepared.items.map((_, index) => prepared.uploadIdempotencyKey(index))).toEqual([
+    ...vector.expected.upload_idempotency_keys,
+  ]);
+
+  expect(vector.supersedes).toBeNull();
+  expect(vector.signers).toBeNull();
+  const record = await encodePassphraseSealedRecord(prepared, vector.uris);
+  expect(bytesToHex(record)).toBe(vector.expected.record_hex);
+}
+
 describe('prepared-seal cross-SDK parity vectors', () => {
   it('pins the single-item hybrid vector', async () => {
     await runVector('single-item-mlkem768x25519.json');
@@ -136,11 +206,23 @@ describe('prepared-seal cross-SDK parity vectors', () => {
     await runVector('multi-item-hybrid.json');
   });
 
+  // The co-hash vector: one item bound under BOTH sha2-256 and blake2b-256, so
+  // the `hashes` map carries two entries and every digest feeds the slots MAC.
+  it('pins the single-item hybrid co-hash vector', async () => {
+    await runVector('single-item-cohash-mlkem768x25519.json');
+  });
+
   it('item ids are the SHA-256 of each ciphertext', () => {
-    const vector = loadVector('multi-item-x25519.json');
+    const vector = loadVector<PreparedSealVector>('multi-item-x25519.json');
     const parsed = preparedSealFromJson(vector.expected.prepared_seal_json);
     for (const item of parsed.items) {
       expect(item.itemId).toBe(bytesToHex(sha256(item.ciphertext())));
     }
+  });
+});
+
+describe('passphrase prepared-seal cross-SDK parity vector', () => {
+  it('pins the single-item passphrase vector', async () => {
+    await runPassphraseVector('single-item-passphrase.json');
   });
 });

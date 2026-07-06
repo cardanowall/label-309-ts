@@ -209,7 +209,7 @@ const KEM_ID_BYTES = 14;
  * 64-byte Ed25519 signature (encoded as a 66-byte byte string):
  * `1 + 40 + 1 + 1 + 66`.
  */
-const COSE_SIGN1_PATH1_BYTES = 109;
+export const COSE_SIGN1_PATH1_BYTES = 109;
 /**
  * The `leaf_count` is unknown at estimate time; the leaf count fits an
  * unsigned 64-bit integer, so the estimate charges the maximum uint header
