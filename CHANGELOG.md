@@ -9,6 +9,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 > release. Pre-1.0 versions do not carry the stability guarantees of
 > [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-07-28
+
+### Breaking
+
+- `sdk-ts`: the size estimator's `ItemShape` carries an explicit `enc` shape instead of a bare optional `kem`, because a passphrase envelope and a KEM envelope encode to very different widths. A recipient-sealed item is now `{ enc: { kind: 'kem', kem: 'x25519' | 'mlkem768x25519', recipientCount } }` and a passphrase-sealed item is `{ enc: { kind: 'passphrase' } }`; an unsealed item still omits `enc`.
+
+### Added
+
+- `crypto-core`: streaming passphrase sealing and opening — `passphraseSealStream` and `passphraseOpenStream`, the streaming twins of the buffered passphrase pair. They drive the same segmented-STREAM seam and the same KDF and commitment helpers as `passphraseSeal` / `passphraseOpen`, so their output is byte-identical to the buffered path at any read granularity, and a multi-gigabyte payload never has to be held in memory. The open stream fills a 48-byte lookahead before running Argon2id, preserving the buffered path's pre-KDF rejection of a too-short blob, and compares the commitment in constant time before opening any chunk.
+- `sdk-ts`: the estimator prices the 4-key passphrase envelope, charged from crypto-core's authoritative Argon2id and salt floor constants rather than numbers pinned in the estimator.
+
+### Fixed
+
+- All three packages: the published `exports` no longer declare a `development` condition pointing at `./src/*.ts`, which the tarball does not contain. Export conditions are matched on key presence rather than file existence, so every tool that applies that condition — a Vite dev server does — failed to resolve the package, while a production build of the same application succeeded.
+- All three packages: `require()` now resolves its own `.d.cts` declarations. The packages are `type: module`, so the single `types` entry was read as ESM and a CommonJS consumer under `node16` / `nodenext` resolution received declarations it could not use.
+
+### Changed
+
+- All three packages declare `sideEffects: false` (every built entry is self-contained) and `engines.node` >= 20.19.0, the floor their dependencies already require.
+
 ## [0.11.0] - 2026-07-06
 
 ### Added

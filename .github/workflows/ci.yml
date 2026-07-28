@@ -37,9 +37,17 @@ jobs:
       - name: Test (full suite)
         run: pnpm exec vitest run
 
-      - name: Packaging dry-run
+      # Lints the artefact each package would publish, not the working tree:
+      # publint catches an `exports` target the `files` allowlist leaves out of
+      # the tarball (conditions are matched on key presence, not file existence,
+      # so such a target simply fails to resolve for consumers), and attw checks
+      # that both module systems get declarations they can use. The node10
+      # profile is skipped deliberately: subpath exports cannot satisfy legacy
+      # `main`/`types` resolution without a typesVersions shim.
+      - name: Packaging lint (publint + attw)
         run: |
           set -euo pipefail
           for pkg in crypto-core poe-standard sdk-ts; do
-            ( cd "packages/$pkg" && npm pack --dry-run )
+            pnpm exec publint run "packages/$pkg" --strict
+            pnpm exec attw --pack "packages/$pkg" --profile node16 --summary
           done

@@ -24,6 +24,16 @@
 // path-1 COSE_Sign1 (all of which are fixed-shape, so their maxima are exact
 // upper bounds).
 
+// The Argon2id registry floors and the salt-length floor are the crypto
+// layer's authoritative constants; charging the passphrase envelope from them
+// keeps this estimator in lockstep if they are ever retuned.
+import {
+  PASSPHRASE_ARGON2_M_MIN,
+  PASSPHRASE_ARGON2_P_MIN,
+  PASSPHRASE_ARGON2_T_MIN,
+  PASSPHRASE_SALT_MIN_LENGTH,
+} from '@cardanowall/crypto-core';
+
 /**
  * A pre-quote ceiling on the canonical record size, set just under the
  * gateway's ~14,500-byte record ceiling. A record (by its shape) estimated
@@ -107,6 +117,37 @@ function utf8ByteLength(s: string): number {
 }
 
 /**
+ * The `enc` envelope shape of a sealed item: which key-delivery path the
+ * scheme-1 envelope uses, since the two encode to very different widths.
+ */
+export type EncShape =
+  | {
+      readonly kind: 'kem';
+      /**
+       * The KEM every slot is sealed under. Classical `x25519` slots carry a
+       * 32-byte `epk` + 48-byte `wrap`; hybrid `mlkem768x25519` (X-Wing)
+       * slots carry a 1120-byte `kem_ct` + 48-byte `wrap`; the envelope also
+       * carries the KEM id and the 32-byte `slots_mac`.
+       */
+      readonly kem: 'x25519' | 'mlkem768x25519';
+      /** The number of recipient slots. */
+      readonly recipientCount: number;
+    }
+  | {
+      /**
+       * An Argon2id passphrase envelope
+       * (`{scheme, aead, nonce, passphrase: {alg, salt, params}}` — no
+       * slots). Charged at the canonical producer shape: the fixed
+       * `argon2id` identifier, a 16-byte salt, and integer widths that cover
+       * the whole `m` wire range plus `t` / `p` up to CBOR's one-byte
+       * immediate range (23) — every parameter set the reference producers
+       * emit. A producer choosing a longer salt or larger `t` / `p` must
+       * size its envelope by building and measuring it.
+       */
+      readonly kind: 'passphrase';
+    };
+
+/**
  * The shape of one content item to size. Every field maps to a CBOR component
  * whose maximum encoded width the estimator sums.
  */
@@ -122,15 +163,11 @@ export interface ItemShape {
    * width. Omitted/empty for a hash-only item.
    */
   readonly uris?: readonly string[];
-  /** The number of recipient slots (`0` for an unsealed item). */
-  readonly recipientCount?: number;
   /**
-   * The KEM this item's envelope is sealed under, when sealed. Classical
-   * `x25519` slots carry a 32-byte `epk` + 48-byte `wrap`; hybrid
-   * `mlkem768x25519` (X-Wing) slots carry a 1120-byte `kem_ct` + 48-byte
-   * `wrap`. Omit for an unsealed item (no `enc` block).
+   * The sealed envelope's shape, when sealed. Omit for an unsealed item (no
+   * `enc` block).
    */
-  readonly kem?: 'x25519' | 'mlkem768x25519';
+  readonly enc?: EncShape;
 }
 
 /** The shape of a Merkle commitment for the estimate. */
@@ -188,6 +225,10 @@ const EPK_KEY = 3; // "epk"
 const KEM_CT_KEY = 6; // "kem_ct"
 const WRAP_KEY = 4; // "wrap"
 const COSE_SIGN1_KEY = 10; // "cose_sign1"
+const PASSPHRASE_KEY = 10; // "passphrase"
+const SALT_KEY = 4; // "salt"
+const PARAMS_KEY = 6; // "params"
+const PARAM_NAME_KEY = 1; // "m" / "t" / "p"
 
 /**
  * A content-hash digest is 32 bytes for every algorithm the publish helpers
@@ -201,6 +242,8 @@ const DIGEST_BYTES = 32;
 const AEAD_ID_BYTES = 27;
 /** The longest KEM identifier (`mlkem768x25519`, 14 bytes). */
 const KEM_ID_BYTES = 14;
+/** The sole passphrase-KDF identifier (`argon2id`, 8 bytes). */
+const PASSPHRASE_ALG_ID_BYTES = 8;
 /**
  * The exact byte length of a detached **path-1** COSE_Sign1, which is fully
  * fixed-shape: a 4-element array (`0x84`) of the 38-byte protected header
@@ -229,33 +272,60 @@ function urisBytes(uris: readonly string[] | undefined): number {
 }
 
 /**
- * The `enc` scheme-1 envelope: `{scheme, aead, nonce, kem, slots, slots_mac}`
- * (6 keys) plus one slot per recipient.
+ * The `enc` scheme-1 envelope, by key-delivery path: the slots shape
+ * `{scheme, aead, nonce, kem, slots, slots_mac}` (6 keys) plus one slot per
+ * recipient, or the passphrase shape
+ * `{scheme, aead, nonce, passphrase: {alg, salt, params}}` (4 keys) at the
+ * canonical producer widths (see {@link EncShape}).
  */
-function envelopeBytes(kem: 'x25519' | 'mlkem768x25519', recipientCount: number): number {
-  let env = containerHeader(6); // the 6-key envelope map header
+function envelopeBytes(enc: EncShape): number {
+  if (enc.kind === 'kem') {
+    const { kem, recipientCount } = enc;
+    let env = containerHeader(6); // the 6-key envelope map header
+    env += strBytes(SCHEME_KEY) + uintBytes(1); // scheme is the value `1`
+    env += strBytes(AEAD_KEY) + strBytes(AEAD_ID_BYTES);
+    env += strBytes(NONCE_KEY) + strBytes(ENVELOPE_NONCE_BYTES);
+    env += strBytes(KEM_KEY) + strBytes(KEM_ID_BYTES);
+    env += strBytes(SLOTS_MAC_KEY) + strBytes(SLOTS_MAC_BYTES);
+    // slots: an array of per-recipient 2-key slot maps.
+    env += strBytes(SLOTS_KEY) + containerHeader(recipientCount);
+    const perSlot =
+      kem === 'x25519'
+        ? // `{epk: 32, wrap: 48}`
+          containerHeader(2) +
+          strBytes(EPK_KEY) +
+          strBytes(SLOT_EPK_BYTES) +
+          strBytes(WRAP_KEY) +
+          strBytes(SLOT_WRAP_BYTES)
+        : // `{kem_ct: 1120, wrap: 48}`
+          containerHeader(2) +
+          strBytes(KEM_CT_KEY) +
+          strBytes(SLOT_KEM_CT_BYTES) +
+          strBytes(WRAP_KEY) +
+          strBytes(SLOT_WRAP_BYTES);
+    return env + slotsBytes(perSlot, recipientCount);
+  }
+  // The 4-key passphrase envelope map: no kem, no slots, no slots_mac — the
+  // key commitment lives inside the ciphertext blob, not on chain.
+  let env = containerHeader(4);
   env += strBytes(SCHEME_KEY) + uintBytes(1); // scheme is the value `1`
   env += strBytes(AEAD_KEY) + strBytes(AEAD_ID_BYTES);
   env += strBytes(NONCE_KEY) + strBytes(ENVELOPE_NONCE_BYTES);
-  env += strBytes(KEM_KEY) + strBytes(KEM_ID_BYTES);
-  env += strBytes(SLOTS_MAC_KEY) + strBytes(SLOTS_MAC_BYTES);
-  // slots: an array of per-recipient 2-key slot maps.
-  env += strBytes(SLOTS_KEY) + containerHeader(recipientCount);
-  const perSlot =
-    kem === 'x25519'
-      ? // `{epk: 32, wrap: 48}`
-        containerHeader(2) +
-        strBytes(EPK_KEY) +
-        strBytes(SLOT_EPK_BYTES) +
-        strBytes(WRAP_KEY) +
-        strBytes(SLOT_WRAP_BYTES)
-      : // `{kem_ct: 1120, wrap: 48}`
-        containerHeader(2) +
-        strBytes(KEM_CT_KEY) +
-        strBytes(SLOT_KEM_CT_BYTES) +
-        strBytes(WRAP_KEY) +
-        strBytes(SLOT_WRAP_BYTES);
-  return env + slotsBytes(perSlot, recipientCount);
+  // passphrase: `{alg, salt, params: {m, t, p}}` at the canonical producer
+  // widths — the fixed `argon2id` id, a salt at the registry-floor length, and
+  // the registry-floor parameter integers, all read from the crypto layer's
+  // authoritative constants (`m`'s floor already charges the full
+  // 4-byte-extension uint width, covering every wire-range `m`; `t`/`p` are
+  // covered up to CBOR's 1-byte immediate maximum of 23).
+  let params = containerHeader(3);
+  params += strBytes(PARAM_NAME_KEY) + uintBytes(PASSPHRASE_ARGON2_M_MIN);
+  params += strBytes(PARAM_NAME_KEY) + uintBytes(PASSPHRASE_ARGON2_T_MIN);
+  params += strBytes(PARAM_NAME_KEY) + uintBytes(PASSPHRASE_ARGON2_P_MIN);
+  let block = containerHeader(3);
+  block += strBytes(ALG_KEY) + strBytes(PASSPHRASE_ALG_ID_BYTES);
+  block += strBytes(SALT_KEY) + strBytes(PASSPHRASE_SALT_MIN_LENGTH);
+  block += strBytes(PARAMS_KEY) + params;
+  return env + strBytes(PASSPHRASE_KEY) + block;
 }
 
 /**
@@ -285,7 +355,7 @@ function itemBytes(item: ItemShape): number {
   const hasUris = item.uris !== undefined && item.uris.length > 0;
   let itemKeys = 1; // hashes
   if (hasUris) itemKeys += 1;
-  if (item.kem !== undefined) itemKeys += 1;
+  if (item.enc !== undefined) itemKeys += 1;
   let out = containerHeader(itemKeys); // the item map header
   // hashes: a map of (alg-id -> 32-byte digest).
   out += strBytes(HASHES_KEY) + containerHeader(item.hashAlgs.length);
@@ -293,8 +363,8 @@ function itemBytes(item: ItemShape): number {
   // uris: an array of URI strings.
   out += urisBytes(item.uris);
   // enc: the sealed envelope, when sealed.
-  if (item.kem !== undefined) {
-    out += strBytes(ENC_KEY) + envelopeBytes(item.kem, item.recipientCount ?? 0);
+  if (item.enc !== undefined) {
+    out += strBytes(ENC_KEY) + envelopeBytes(item.enc);
   }
   return out;
 }

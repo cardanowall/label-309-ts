@@ -1,7 +1,8 @@
 {
   "name": "@cardanowall/sdk-ts",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "type": "module",
+  "sideEffects": false,
   "description": "CardanoWall TypeScript SDK — standalone Label 309 verifier + envelope helpers + HTTP client (browser-safe).",
   "license": "Apache-2.0",
   "author": "CardanoWall <hello@cardanowall.com>",
@@ -35,64 +36,104 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "development": "./src/index.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./fetch": {
-      "types": "./dist/fetch/index.d.ts",
-      "development": "./src/fetch/index.ts",
-      "import": "./dist/fetch/index.js",
-      "require": "./dist/fetch/index.cjs"
+      "import": {
+        "types": "./dist/fetch/index.d.ts",
+        "default": "./dist/fetch/index.js"
+      },
+      "require": {
+        "types": "./dist/fetch/index.d.cts",
+        "default": "./dist/fetch/index.cjs"
+      }
     },
     "./verifier": {
-      "types": "./dist/verifier/index.d.ts",
-      "development": "./src/verifier/index.ts",
-      "import": "./dist/verifier/index.js",
-      "require": "./dist/verifier/index.cjs"
+      "import": {
+        "types": "./dist/verifier/index.d.ts",
+        "default": "./dist/verifier/index.js"
+      },
+      "require": {
+        "types": "./dist/verifier/index.d.cts",
+        "default": "./dist/verifier/index.cjs"
+      }
     },
     "./client": {
-      "types": "./dist/client/index.d.ts",
-      "development": "./src/client/index.ts",
-      "import": "./dist/client/index.js",
-      "require": "./dist/client/index.cjs"
+      "import": {
+        "types": "./dist/client/index.d.ts",
+        "default": "./dist/client/index.js"
+      },
+      "require": {
+        "types": "./dist/client/index.d.cts",
+        "default": "./dist/client/index.cjs"
+      }
     },
     "./ids": {
-      "types": "./dist/ids/index.d.ts",
-      "development": "./src/ids/index.ts",
-      "import": "./dist/ids/index.js",
-      "require": "./dist/ids/index.cjs"
+      "import": {
+        "types": "./dist/ids/index.d.ts",
+        "default": "./dist/ids/index.js"
+      },
+      "require": {
+        "types": "./dist/ids/index.d.cts",
+        "default": "./dist/ids/index.cjs"
+      }
     },
     "./merkle": {
-      "types": "./dist/merkle/index.d.ts",
-      "development": "./src/merkle/index.ts",
-      "import": "./dist/merkle/index.js",
-      "require": "./dist/merkle/index.cjs"
+      "import": {
+        "types": "./dist/merkle/index.d.ts",
+        "default": "./dist/merkle/index.js"
+      },
+      "require": {
+        "types": "./dist/merkle/index.d.cts",
+        "default": "./dist/merkle/index.cjs"
+      }
     },
     "./estimate": {
-      "types": "./dist/estimate/index.d.ts",
-      "development": "./src/estimate/index.ts",
-      "import": "./dist/estimate/index.js",
-      "require": "./dist/estimate/index.cjs"
+      "import": {
+        "types": "./dist/estimate/index.d.ts",
+        "default": "./dist/estimate/index.js"
+      },
+      "require": {
+        "types": "./dist/estimate/index.d.cts",
+        "default": "./dist/estimate/index.cjs"
+      }
     },
     "./certificate": {
-      "types": "./dist/certificate/index.d.ts",
-      "development": "./src/certificate/index.ts",
-      "import": "./dist/certificate/index.js",
-      "require": "./dist/certificate/index.cjs"
+      "import": {
+        "types": "./dist/certificate/index.d.ts",
+        "default": "./dist/certificate/index.js"
+      },
+      "require": {
+        "types": "./dist/certificate/index.d.cts",
+        "default": "./dist/certificate/index.cjs"
+      }
     },
     "./hash": {
-      "types": "./dist/hash/index.d.ts",
-      "development": "./src/hash/index.ts",
-      "import": "./dist/hash/index.js",
-      "require": "./dist/hash/index.cjs"
+      "import": {
+        "types": "./dist/hash/index.d.ts",
+        "default": "./dist/hash/index.js"
+      },
+      "require": {
+        "types": "./dist/hash/index.d.cts",
+        "default": "./dist/hash/index.cjs"
+      }
     },
     "./identity": {
-      "types": "./dist/identity/index.d.ts",
-      "development": "./src/identity/index.ts",
-      "import": "./dist/identity/index.js",
-      "require": "./dist/identity/index.cjs"
+      "import": {
+        "types": "./dist/identity/index.d.ts",
+        "default": "./dist/identity/index.js"
+      },
+      "require": {
+        "types": "./dist/identity/index.d.cts",
+        "default": "./dist/identity/index.cjs"
+      }
     }
   },
   "files": [
@@ -100,6 +141,9 @@
     "README.md",
     "LICENSE"
   ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit -p tsconfig.json"

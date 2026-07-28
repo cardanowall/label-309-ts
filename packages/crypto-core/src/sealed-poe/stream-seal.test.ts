@@ -2,7 +2,7 @@
 // (`sealStream` / `unwrapStream`). The streamed output MUST be byte-identical to
 // the buffered `eciesSealedPoeWrap` / `eciesSealedPoeUnwrap` path, so these tests
 // use the EXISTING pinned vectors (`wrap-*.json`, `unwrap-*.json`) as the oracle
-// — no new crypto vectors. The load-bearing proof is R1: source read boundaries
+// — no new crypto vectors. The load-bearing proof is that source read boundaries
 // are NOT STREAM chunk boundaries, so the streamed plaintext is fed in odd-sized
 // producer chunks (1 B, 65535, 65537, exact 64 KiB, exact 2×64 KiB) and the
 // concatenated ciphertext is asserted against the buffered output. Tampering a
@@ -136,13 +136,13 @@ describe('sealStream — byte-identical ciphertext against pinned wrap vectors',
 });
 
 // ---------------------------------------------------------------------------
-// Seal byte-parity against the buffered path across the 64 KiB chunk boundary
-// (R1). No vector covers a multi-chunk plaintext, so the buffered
+// Seal byte-parity against the buffered path across the 64 KiB chunk boundary.
+// No vector covers a multi-chunk plaintext, so the buffered
 // eciesSealedPoeWrap (itself pinned by wrap.kat.test.ts) is the equivalence
 // oracle — the standard incremental-vs-whole proof, zero new vectors.
 // ---------------------------------------------------------------------------
 
-describe('sealStream — equals the buffered seal across the chunk boundary (R1)', () => {
+describe('sealStream — equals the buffered seal across the chunk boundary', () => {
   // Deterministic envelope inputs so the buffered and streamed seals are fully
   // byte-identical and the only variable is the producer chunking: a fixed CEK,
   // nonce, AND ephemeral secret (otherwise the random epk per call would change
@@ -283,10 +283,10 @@ describe('unwrapStream — byte-identical plaintext against pinned unwrap vector
 });
 
 // ---------------------------------------------------------------------------
-// Unwrap byte-parity against the buffered path across the chunk boundary (R1)
+// Unwrap byte-parity against the buffered path across the chunk boundary
 // ---------------------------------------------------------------------------
 
-describe('unwrapStream — equals the buffered unwrap across the chunk boundary (R1)', () => {
+describe('unwrapStream — equals the buffered unwrap across the chunk boundary', () => {
   const priv = new Uint8Array(32).fill(0x44);
   const recipientPublicKeys = [x25519PublicKey({ secretKey: priv })];
 

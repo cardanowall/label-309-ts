@@ -10,11 +10,12 @@
 //
 // The source's read boundaries are NOT the STREAM chunk boundaries: an
 // `AsyncIterable` may hand over bytes in any sizes. Both directions therefore
-// re-chunk with a one-block EOF lookahead — a full-size block is kept PENDING
-// and only marked `final` once the next read proves end-of-input — because the
-// STREAM final flag lives in the nonce and a final chunk may itself be full
-// size. An exact multiple of the chunk size has NO trailing empty chunk; only a
-// truly empty input is the single empty-final case.
+// re-chunk with a one-block EOF lookahead (`rechunk.ts`, shared with the
+// streaming passphrase pair) — a full-size block is kept PENDING and only
+// marked `final` once the next read proves end-of-input — because the STREAM
+// final flag lives in the nonce and a final chunk may itself be full size. An
+// exact multiple of the chunk size has NO trailing empty chunk; only a truly
+// empty input is the single empty-final case.
 //
 // Integrity contract (the SDK half of integrity-before-release): per-chunk
 // Poly1305 plus the final-flag give per-segment authentication and truncation
@@ -26,14 +27,8 @@
 // record's `hashes` before treating the bytes as released. A consumer should
 // write them to a quarantine, not a final destination, until both checks pass.
 
-import {
-  CHUNK_SIZE,
-  SEALED_CHUNK_SIZE,
-  StreamOpener,
-  StreamSealer,
-  StreamTamperedError,
-  TAG_SIZE,
-} from './stream';
+import { rechunkPlaintext, rechunkSealed } from './rechunk';
+import { StreamOpener, StreamSealer, StreamTamperedError } from './stream';
 import { slotsPayloadKey, type ItemHashes } from './transcript';
 import {
   eciesSealedPoeTrialDecrypt,
@@ -105,115 +100,6 @@ export interface UnwrapStreamResult {
   // Yields verified plaintext, CHUNK_SIZE at a time. TENTATIVE until `outcome`
   // is `Matched` and the caller's item-hash recompute passes (see file header).
   readonly plaintext: AsyncIterable<Uint8Array>;
-}
-
-// Re-chunk an arbitrary-sized async byte stream into exactly-CHUNK_SIZE plaintext
-// blocks with one-block EOF lookahead, yielding `final: true` only on the true
-// last block. An exact multiple of CHUNK_SIZE ends on a full final block (no
-// trailing empty chunk); a truly empty input yields one empty final block.
-async function* rechunkPlaintext(
-  source: AsyncIterable<Uint8Array>,
-  signal: AbortSignal | undefined,
-): AsyncGenerator<{ chunk: Uint8Array; final: boolean }> {
-  const acc = new Uint8Array(CHUNK_SIZE);
-  let accLen = 0;
-  // A completed full block awaiting its final/non-final verdict: it is non-final
-  // iff any further block follows.
-  let pending: Uint8Array | null = null;
-  let emittedAny = false;
-
-  for await (const raw of source) {
-    signal?.throwIfAborted();
-    let offset = 0;
-    while (offset < raw.length) {
-      const take = Math.min(CHUNK_SIZE - accLen, raw.length - offset);
-      acc.set(raw.subarray(offset, offset + take), accLen);
-      accLen += take;
-      offset += take;
-      if (accLen === CHUNK_SIZE) {
-        if (pending !== null) {
-          yield { chunk: pending, final: false };
-          emittedAny = true;
-        }
-        pending = acc.slice(0, CHUNK_SIZE);
-        accLen = 0;
-      }
-    }
-  }
-  signal?.throwIfAborted();
-
-  if (accLen > 0) {
-    // A short trailing block. Any pending full block precedes it, so it is
-    // non-final; the short block is the final one.
-    if (pending !== null) {
-      yield { chunk: pending, final: false };
-    }
-    yield { chunk: acc.slice(0, accLen), final: true };
-    emittedAny = true;
-  } else if (pending !== null) {
-    // Input was an exact multiple of CHUNK_SIZE: the last full block is final.
-    yield { chunk: pending, final: true };
-    emittedAny = true;
-  }
-  if (!emittedAny) {
-    // Empty input → exactly one empty final chunk (a lone tag).
-    yield { chunk: new Uint8Array(0), final: true };
-  }
-}
-
-// Re-chunk an arbitrary-sized async ciphertext stream into SEALED_CHUNK_SIZE
-// sealed blocks with one-block EOF lookahead. The final block is opened with
-// `final: true` even when it is exactly SEALED_CHUNK_SIZE; a trailing sealed
-// length of 1..15 (below the tag floor) or a totally empty stream is rejected
-// here, before any tag is checked, mirroring the buffered `streamOpen` layout
-// math.
-async function* rechunkSealed(
-  source: AsyncIterable<Uint8Array>,
-  signal: AbortSignal | undefined,
-): AsyncGenerator<{ chunk: Uint8Array; final: boolean }> {
-  const acc = new Uint8Array(SEALED_CHUNK_SIZE);
-  let accLen = 0;
-  let pending: Uint8Array | null = null;
-  let sawAny = false;
-
-  for await (const raw of source) {
-    signal?.throwIfAborted();
-    let offset = 0;
-    while (offset < raw.length) {
-      sawAny = true;
-      const take = Math.min(SEALED_CHUNK_SIZE - accLen, raw.length - offset);
-      acc.set(raw.subarray(offset, offset + take), accLen);
-      accLen += take;
-      offset += take;
-      if (accLen === SEALED_CHUNK_SIZE) {
-        if (pending !== null) {
-          yield { chunk: pending, final: false };
-        }
-        pending = acc.slice(0, SEALED_CHUNK_SIZE);
-        accLen = 0;
-      }
-    }
-  }
-  signal?.throwIfAborted();
-
-  if (accLen > 0) {
-    // A trailing partial sealed block. A full SEALED_CHUNK_SIZE block would have
-    // moved to `pending`, so this is 1..SEALED_CHUNK_SIZE-1 bytes; anything below
-    // the TAG_SIZE tag floor cannot form a well-formed final chunk.
-    if (accLen < TAG_SIZE) {
-      throw new StreamTamperedError('STREAM: trailing bytes cannot form a well-formed final chunk');
-    }
-    if (pending !== null) {
-      yield { chunk: pending, final: false };
-    }
-    yield { chunk: acc.slice(0, accLen), final: true };
-  } else if (pending !== null) {
-    // Exact multiple of SEALED_CHUNK_SIZE: the last full sealed block is final.
-    yield { chunk: pending, final: true };
-  } else if (!sawAny) {
-    // No bytes at all — below the single-tag floor.
-    throw new StreamTamperedError('STREAM: ciphertext shorter than the single-tag floor');
-  }
 }
 
 /**

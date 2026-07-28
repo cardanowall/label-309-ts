@@ -1,7 +1,8 @@
 {
   "name": "@cardanowall/poe-standard",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "type": "module",
+  "sideEffects": false,
   "description": "Label 309 Proof-of-Existence record schema, canonical-CBOR encoder, and validator.",
   "license": "Apache-2.0",
   "author": "CardanoWall <hello@cardanowall.com>",
@@ -19,40 +20,64 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "development": "./src/index.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./schema": {
-      "types": "./dist/schema.d.ts",
-      "development": "./src/schema.ts",
-      "import": "./dist/schema.js",
-      "require": "./dist/schema.cjs"
+      "import": {
+        "types": "./dist/schema.d.ts",
+        "default": "./dist/schema.js"
+      },
+      "require": {
+        "types": "./dist/schema.d.cts",
+        "default": "./dist/schema.cjs"
+      }
     },
     "./encoder": {
-      "types": "./dist/encoder.d.ts",
-      "development": "./src/encoder.ts",
-      "import": "./dist/encoder.js",
-      "require": "./dist/encoder.cjs"
+      "import": {
+        "types": "./dist/encoder.d.ts",
+        "default": "./dist/encoder.js"
+      },
+      "require": {
+        "types": "./dist/encoder.d.cts",
+        "default": "./dist/encoder.cjs"
+      }
     },
     "./carriage": {
-      "types": "./dist/carriage.d.ts",
-      "development": "./src/carriage.ts",
-      "import": "./dist/carriage.js",
-      "require": "./dist/carriage.cjs"
+      "import": {
+        "types": "./dist/carriage.d.ts",
+        "default": "./dist/carriage.js"
+      },
+      "require": {
+        "types": "./dist/carriage.d.cts",
+        "default": "./dist/carriage.cjs"
+      }
     },
     "./validator": {
-      "types": "./dist/validator.d.ts",
-      "development": "./src/validator.ts",
-      "import": "./dist/validator.js",
-      "require": "./dist/validator.cjs"
+      "import": {
+        "types": "./dist/validator.d.ts",
+        "default": "./dist/validator.js"
+      },
+      "require": {
+        "types": "./dist/validator.d.cts",
+        "default": "./dist/validator.cjs"
+      }
     },
     "./error-codes": {
-      "types": "./dist/error-codes.d.ts",
-      "development": "./src/error-codes.ts",
-      "import": "./dist/error-codes.js",
-      "require": "./dist/error-codes.cjs"
+      "import": {
+        "types": "./dist/error-codes.d.ts",
+        "default": "./dist/error-codes.js"
+      },
+      "require": {
+        "types": "./dist/error-codes.d.cts",
+        "default": "./dist/error-codes.cjs"
+      }
     }
   },
   "files": [
@@ -60,6 +85,9 @@
     "README.md",
     "LICENSE"
   ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit -p tsconfig.json"

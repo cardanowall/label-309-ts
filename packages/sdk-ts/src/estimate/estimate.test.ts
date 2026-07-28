@@ -121,7 +121,13 @@ describe('estimateRecordBytes — cross-SDK parity table', () => {
   it('T5: sealed x25519, 2 recipients, sha2-256 + URI → 472', () => {
     expect(
       estimateRecordBytes({
-        items: [{ hashAlgs: ['sha2-256'], uris: [URI], recipientCount: 2, kem: 'x25519' }],
+        items: [
+          {
+            hashAlgs: ['sha2-256'],
+            uris: [URI],
+            enc: { kind: 'kem', kem: 'x25519', recipientCount: 2 },
+          },
+        ],
       }),
     ).toBe(472);
   });
@@ -129,10 +135,27 @@ describe('estimateRecordBytes — cross-SDK parity table', () => {
   it('T6: sealed X-Wing, 11 recipients, sha2-256 + URI, signed → 13459', () => {
     expect(
       estimateRecordBytes({
-        items: [{ hashAlgs: ['sha2-256'], uris: [URI], recipientCount: 11, kem: 'mlkem768x25519' }],
+        items: [
+          {
+            hashAlgs: ['sha2-256'],
+            uris: [URI],
+            enc: { kind: 'kem', kem: 'mlkem768x25519', recipientCount: 11 },
+          },
+        ],
         signed: true,
       }),
     ).toBe(13459);
+  });
+
+  it('T7: passphrase-sealed, dual-hash + URI, signed → 457', () => {
+    expect(
+      estimateRecordBytes({
+        items: [
+          { hashAlgs: ['sha2-256', 'blake2b-256'], uris: [URI], enc: { kind: 'passphrase' } },
+        ],
+        signed: true,
+      }),
+    ).toBe(457);
   });
 });
 
@@ -210,7 +233,11 @@ describe('estimateRecordBytes — upper bound against the real encoder', () => {
     const hashes = { 'sha2-256': digest(0x07) };
     const shape: RecordShape = {
       items: [
-        { hashAlgs: ['sha2-256'], uris: [uri], recipientCount: recipients.length, kem: 'x25519' },
+        {
+          hashAlgs: ['sha2-256'],
+          uris: [uri],
+          enc: { kind: 'kem', kem: 'x25519', recipientCount: recipients.length },
+        },
       ],
     };
     const record: PoeRecord = {
@@ -229,8 +256,7 @@ describe('estimateRecordBytes — upper bound against the real encoder', () => {
         {
           hashAlgs: ['sha2-256'],
           uris: [uri],
-          recipientCount: recipients.length,
-          kem: 'mlkem768x25519',
+          enc: { kind: 'kem', kem: 'mlkem768x25519', recipientCount: recipients.length },
         },
       ],
       signed: true,
@@ -252,6 +278,75 @@ describe('estimateRecordBytes — upper bound against the real encoder', () => {
       merkle: [{ alg: MERKLE_ALG_ID, root, leaf_count: leaves.length, uris: [uri] }],
     };
     expectUpperBound(shape, record);
+  });
+});
+
+/**
+ * A real scheme-1 passphrase envelope (4 keys, no slots) with the given salt
+ * and Argon2id parameters, exactly as the passphrase publish path lowers it
+ * into the record.
+ */
+function passphraseEnvelope(salt: Uint8Array, m: number, t: number, p: number): EncryptionEnvelope {
+  return {
+    scheme: 1,
+    aead: 'chacha20-poly1305-stream64k',
+    nonce: own(new Uint8Array(24).fill(0x66)),
+    passphrase: { alg: 'argon2id', salt: own(salt), params: { m, t, p } },
+  };
+}
+
+describe('estimateRecordBytes — passphrase envelope bound against the real encoder', () => {
+  it('bounds a signed passphrase-sealed record tightly at the canonical producer shape', () => {
+    // The canonical producer shape: a 16-byte salt and the registry-floor
+    // parameters. The estimate must bound the real encoding and stay tight —
+    // the only slack is the fixed safety margin.
+    const hashes = { 'sha2-256': digest(0xab), 'blake2b-256': digest(0xcd) };
+    const shape: RecordShape = {
+      items: [{ hashAlgs: ['sha2-256', 'blake2b-256'], uris: [URI], enc: { kind: 'passphrase' } }],
+      signed: true,
+    };
+    const record = signRecord({
+      v: 1,
+      items: [
+        {
+          hashes,
+          uris: [URI],
+          enc: passphraseEnvelope(new Uint8Array(16).fill(0x55), 65536, 3, 1),
+        },
+      ],
+    });
+    const actual = encodePoeRecord(record).length;
+    const estimate = estimateRecordBytes(shape);
+    expect(estimate).toBeGreaterThanOrEqual(actual);
+    expect(estimate - actual).toBeLessThanOrEqual(64);
+  });
+
+  it('stays an upper bound across the whole in-contract parameter region', () => {
+    // `m` anywhere in the u32 wire range (its floor already charges the
+    // 4-byte-extension width) and `t` / `p` up to CBOR's one-byte immediate
+    // maximum of 23.
+    const shape: RecordShape = {
+      items: [{ hashAlgs: ['sha2-256'], enc: { kind: 'passphrase' } }],
+    };
+    for (const [m, t, p] of [
+      [65536, 3, 1],
+      [0xffff_ffff, 3, 1],
+      [65536, 23, 23],
+      [0xffff_ffff, 23, 23],
+    ] as const) {
+      const record: PoeRecord = {
+        v: 1,
+        items: [
+          {
+            hashes: { 'sha2-256': digest(0xab) },
+            enc: passphraseEnvelope(new Uint8Array(16).fill(0x55), m, t, p),
+          },
+        ],
+      };
+      const actual = encodePoeRecord(record).length;
+      const estimate = estimateRecordBytes(shape);
+      expect(estimate).toBeGreaterThanOrEqual(actual);
+    }
   });
 });
 
@@ -304,8 +399,7 @@ describe('estimateRecordBytes — tightness near the ceiling', () => {
         {
           hashAlgs: ['sha2-256'],
           uris: [uri],
-          recipientCount: recipients.length,
-          kem: 'mlkem768x25519',
+          enc: { kind: 'kem', kem: 'mlkem768x25519', recipientCount: recipients.length },
         },
       ],
       signed: true,
@@ -335,8 +429,7 @@ describe('estimateRecordBytes — tightness near the ceiling', () => {
         {
           hashAlgs: ['sha2-256'],
           uris: [uri],
-          recipientCount: recipients.length,
-          kem: 'mlkem768x25519',
+          enc: { kind: 'kem', kem: 'mlkem768x25519', recipientCount: recipients.length },
         },
       ],
       signed: true,
@@ -389,8 +482,11 @@ describe('estimateRecordBytes — precision guard on absurd inputs', () => {
       items: [
         {
           hashAlgs: ['sha2-256'],
-          recipientCount: Number.MAX_SAFE_INTEGER,
-          kem: 'mlkem768x25519',
+          enc: {
+            kind: 'kem',
+            kem: 'mlkem768x25519',
+            recipientCount: Number.MAX_SAFE_INTEGER,
+          },
         },
       ],
     });

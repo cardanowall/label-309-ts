@@ -1331,8 +1331,7 @@ function preparedQuoteInput(
     items: data.itemsData.map((item) => ({
       hashAlgs: [...item.hashes.keys()],
       uris: [arweaveUriPlaceholder()],
-      recipientCount: item.envelope.slots.length,
-      kem: data.kem,
+      enc: { kind: 'kem', kem: data.kem, recipientCount: item.envelope.slots.length },
     })),
     signed,
     supersedes,
